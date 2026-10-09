@@ -1,0 +1,103 @@
+{
+  "apiVersion": 2,
+  "minHostVersion": "0.10.2",
+  "requiredCapabilities": [
+    "python.executionTimeout",
+    "python.mediaWorkspace",
+    "invocation.cancel",
+    "tool.effectBudgets",
+    "video.nodeSetGeneration",
+    "prompt.mentions"
+  ],
+  "runtime": "python",
+  "id": "com.aicanvas.video-replica",
+  "name": "视频复刻",
+  "version": "0.1.0",
+  "author": "AI Canvas",
+  "description": "拆解视频镜头与运镜，复用应用图卡引用选取器制作 ReShot 控制素材，通过已配置视频模型或 ComfyUI 逐镜生成。",
+  "license": "Apache-2.0",
+  "category": "media",
+  "keywords": [
+    "视频复刻",
+    "拉片",
+    "分镜",
+    "ReShot",
+    "video-breakdown"
+  ],
+  "entry": "main.py",
+  "permissions": [
+    "node.read",
+    "node.write",
+    "models.read",
+    "models.invoke",
+    "files.connected.read",
+    "files.output.create",
+    "ui.custom",
+    "prompt.references.read"
+  ],
+  "ui": {
+    "entry": "ui.js",
+    "integrity": "sha256-2d67ac6e5a5e89122873a271608e4b3c4cebdf003100def03f5029a685a79446",
+    "exports": {
+      "replica": "VideoReplica"
+    }
+  },
+  "contributes": {
+    "nodeTools": [
+      {
+        "id": "replicate",
+        "pythonExecution": {
+          "timeoutSeconds": 120,
+          "mediaWorkspace": true
+        },
+        "title": "视频复刻",
+        "description": "切镜、逐镜提示词与动作控制素材",
+        "placements": [
+          "node-context-menu",
+          "node-toolbar"
+        ],
+        "icon": "lucide:clapperboard",
+        "nodeTypes": [
+          "source-video",
+          "ai-video"
+        ],
+        "inputFields": [
+          "label",
+          "output",
+          "videoUrl",
+          "videoDuration"
+        ],
+        "resourceAccess": {
+          "self": true
+        },
+        "dialog": {
+          "title": "视频复刻",
+          "description": "先校正镜头，再生成提示词与控制视频。",
+          "submitLabel": "生成复刻素材",
+          "fields": [],
+          "ui": "replica",
+          "presentation": "window"
+        },
+        "output": {
+          "mode": "create-node-set",
+          "generateVideos": true,
+          "nodeTypes": [
+            "source-video",
+            "ai-markdown",
+            "ai-shotlist",
+            "source-image",
+            "ai-video"
+          ],
+          "maxNodes": 25,
+          "fields": [
+            "label",
+            "output",
+            "shotlistRows",
+            "frameAnalysis",
+            "prompt"
+          ]
+        }
+      }
+    ]
+  }
+}
