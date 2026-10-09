@@ -19,12 +19,14 @@ const [{ build }, postcssModule, tailwindModule, react, server, icons, configMod
   importHost('react-dom/server'), importHost('lucide-react'), import(pathToFileURL(resolve(hostRoot, 'tailwind.config.js')).href),
 ]);
 const pickerPath = resolve(hostRoot, 'src/components/shared/MentionPicker.tsx');
+const selectPath = resolve(hostRoot, 'src/components/shared/Select.tsx');
+const uiKitPath = resolve(hostRoot, 'src/styles/ui-kit.css');
 const basePath = resolve(hostRoot, 'src/styles/base.css');
 const pickerCssPath = resolve(hostRoot, 'src/styles/mention-picker.css');
-const [source, pickerSource, baseCss, pickerCss, manifestSource] = await Promise.all([
-  utf8(resolve(pluginRoot, 'src/ui.js')), utf8(pickerPath), utf8(basePath), utf8(pickerCssPath), utf8(resolve(pluginRoot, 'manifest.json')),
+const [source, pickerSource, baseCss, pickerCss, uiKitCss, selectSource, manifestSource] = await Promise.all([
+  utf8(resolve(pluginRoot, 'src/ui.js')), utf8(pickerPath), utf8(basePath), utf8(pickerCssPath), utf8(uiKitPath), utf8(selectPath), utf8(resolve(pluginRoot, 'manifest.json')),
 ]);
-const cssConfig = { ...configModule.default, content: [{ raw: pickerSource, extension: 'tsx' }] };
+const cssConfig = { ...configModule.default, content: [{ raw: pickerSource, extension: 'tsx' }, { raw: selectSource, extension: 'tsx' }, { raw: source, extension: 'js' }] };
 const postcss = postcssModule.default;
 // Share design tokens, not the host window's fixed layout and scrolling policy.
 // Inspect top-level AST nodes only: descendant selectors and application rules stay in the host.
@@ -66,6 +68,7 @@ const localIcons = Object.fromEntries(Object.entries(iconNames).map(([name, expo
 }));
 const virtualModules = {
   '@host/base.css': compiledCss.css,
+  '@host/ui-kit.css': uiKitCss,
   '@host/mention-picker.css': pickerCss,
   '@host/plugin-ui-icons': localIcons,
 };
@@ -76,6 +79,7 @@ const result = await build({
   define: { 'process.env.NODE_ENV': '"production"' },
   plugins: [{ name: 'shared-host-picker', setup(builder) {
     builder.onResolve({ filter: /^@host\/MentionPicker$/ }, () => ({ path: pickerPath }));
+    builder.onResolve({ filter: /^@host\/Select$/ }, () => ({ path: selectPath }));
     builder.onResolve({ filter: /^@host\// }, ({ path }) => {
       if (!Object.hasOwn(virtualModules, path)) throw new Error(`Unknown shared import: ${path}`);
       return { path, namespace: 'shared-host' };

@@ -3,6 +3,8 @@ import { createElement, useLayoutEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { addIcon } from '@iconify/react';
 import MentionPicker from '@host/MentionPicker';
+import Select from '@host/Select';
+import sharedUiKitCss from '@host/ui-kit.css';
 import sharedPickerCss from '@host/mention-picker.css';
 import sharedBaseCss from '@host/base.css';
 import sharedIcons from '@host/plugin-ui-icons';
@@ -25,6 +27,17 @@ function createMentionRenderer(container, onCommit) {
       disposed = true; reactRoot.unmount();
     },
   };
+}
+function createSelectRenderer(container, selectProps) {
+  const reactRoot = createRoot(container);
+  let disposed = false;
+  const onChange = (value) => {
+    if (disposed) return;
+    selectProps.onChange(value);
+    if (!disposed) reactRoot.render(createElement(Select, { ...selectProps, value, onChange }));
+  };
+  reactRoot.render(createElement(Select, { ...selectProps, onChange }));
+  return { dispose() { if (!disposed) { disposed = true; reactRoot.unmount(); } } };
 }
 /* shared-renderer:end */
 
@@ -190,7 +203,7 @@ function createMentionRenderer(container, onCommit) {
     .vr .ui-btn--primary:hover:not(:disabled) { background: color-mix(in srgb, var(--brand) 90%, var(--theme-text)); }
     .vr .ui-btn:disabled { opacity: .5; cursor: default; }
     .vr .ui-btn:focus-visible, .vr .ui-input:focus-visible, .vr .ui-textarea:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-    .vr .ui-input, .vr .ui-select__native, .vr .ui-textarea { width: 100%; min-width: 0; min-height: var(--ui-control-h); padding: 4px 8px;
+    .vr .ui-input, .vr .ui-textarea { width: 100%; min-width: 0; min-height: var(--ui-control-h); padding: 4px 8px;
       border: 1px solid var(--theme-border); border-radius: var(--ui-radius-md); background: var(--theme-input-bg); color: var(--theme-text); font: inherit; }
     .vr .ui-textarea { min-height: 68px; resize: vertical; }
     .vr .ui-field { display: grid; gap: 4px; min-width: 0; }
@@ -385,6 +398,7 @@ function createMentionRenderer(container, onCommit) {
     let playbackElement = null;
     let jobTimer = null; let pollAttempts = 0; let pollFailures = 0; let pollInFlight = false;
     let domListeners = [];
+    let selectRenderers = [];
     let activeMention = null; let mentionCounter = 0; let mentionSource = 'nodes'; let mentionInFlight = false; let queuedMention = null;
     const t = (key) => (STRINGS[props.locale] || STRINGS['en-US'])[key] || key;
     const selected = () => state.shots.filter((shot) => shot.selected);
@@ -567,10 +581,13 @@ function createMentionRenderer(container, onCommit) {
       actions.append(open, element('span', 'ui-text-muted', t('mentionHint'))); wrap.append(actions);
     }
     function selectField(label, value, options, change, identifier) {
-      const wrap = element('label', 'ui-field'); wrap.append(element('span', 'ui-field__label', label));
-      const select = element('select', 'ui-select__native'); select.disabled = locked(); select.dataset.field = identifier;
-      for (const option of options) { const node = element('option', '', option.label); node.value = option.value; select.append(node); }
-      select.value = value; listen(select, 'change', () => { change(select.value); }); wrap.append(select); return wrap;
+      const wrap = element('div', 'ui-field'); wrap.append(element('span', 'ui-field__label', label));
+      const control = element('div'); control.dataset.selectField = identifier;
+      selectRenderers.push(createSelectRenderer(control, {
+        value, options, onChange: change, disabled: locked(), name: identifier,
+        'aria-label': label, fixedMenu: true,
+      }));
+      wrap.append(control); return wrap;
     }
     function image(frame) {
       if (!frame || typeof frame.previewDataUrl !== 'string' || frame.previewDataUrl.length > 240000
@@ -822,10 +839,12 @@ function createMentionRenderer(container, onCommit) {
       if (state.disposed) return;
       const scrollTop = root.scrollTop || 0;
       closeMentions(false);
+      for (const renderer of selectRenderers) renderer.dispose(); selectRenderers = [];
       for (const dispose of domListeners) dispose(); domListeners = [];
       stopPlaybackElement();
+      if (root.ownerDocument.documentElement) root.ownerDocument.documentElement.dataset.theme = props.theme;
       root.replaceChildren(); const container = element('div', 'vr vr-stack'); container.dataset.theme = props.theme;
-      const style = element('style'); style.textContent = sharedBaseCss + sharedPickerCss + CSS; container.append(style);
+      const style = element('style'); style.textContent = sharedBaseCss + sharedUiKitCss + sharedPickerCss + CSS; container.append(style);
       const heading = element('div', 'vr-stack'); heading.append(element('h1', '', t(state.advanced ? 'title' : 'quickTitle')), element('p', 'ui-text-muted', t(state.advanced ? 'subtitle' : 'quickHint'))); container.append(heading);
       if (!STRINGS[props.locale]) container.append(element('p', 'ui-alert', t('localeFallback')));
       if (state.job && (!video || props.parameters?.replicaJob)) {
@@ -881,10 +900,9 @@ function createMentionRenderer(container, onCommit) {
         listen(checkbox, 'change', () => { if (checkbox.checked) state.controls.add(key); else state.controls.delete(key); updateSummary(); }); label.append(checkbox, element('span', '', t(key))); controls.append(label); }
       settingsBody.append(controls, element('p', 'ui-text-muted', t(state.advanced ? 'controlHint' : 'quickControlHint')));
       if (state.advanced) {
-      const modelLabel = element('label', 'ui-field'); modelLabel.append(element('span', 'ui-field__label', t('model'))); const select = element('select', 'ui-select__native'); select.disabled = state.busy; select.dataset.field = 'model';
-      const empty = element('option', '', t('chooseModel')); empty.value = ''; select.append(empty);
-      for (const model of models) { const option = element('option', '', `${model.name} · ${model.provider}`); option.value = model.id; select.append(option); }
-      select.value = state.model; listen(select, 'change', () => { state.model = select.value; }); modelLabel.append(select); settingsBody.append(modelLabel, element('p', 'ui-text-muted', models.length ? t('modelHint') : t('noModels')));
+      settingsBody.append(selectField(t('model'), state.model,
+        [{ value: '', label: t('chooseModel') }, ...models.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider}` }))],
+        (value) => { state.model = value; }, 'model'), element('p', 'ui-text-muted', models.length ? t('modelHint') : t('noModels')));
       settingsBody.append(selectField(t('generation'), state.generationBackend,
         [{ value: 'materials', label: t('materials') }, { value: 'model', label: t('relay') }, { value: 'comfyui', label: t('comfyui') }],
         (value) => { state.generationBackend = value; state.videoModel = ''; render(); }, 'generation-backend'));
@@ -997,6 +1015,7 @@ function createMentionRenderer(container, onCommit) {
       if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; }
       closeMentions(false);
       window.removeEventListener('ai-canvas-theme-change', refresh); window.removeEventListener('ai-canvas-locale-change', refresh);
+      for (const renderer of selectRenderers) renderer.dispose(); selectRenderers = [];
       for (const dispose of domListeners) dispose(); domListeners = [];
       stopPlaybackElement();
       for (const url of objectUrls) URL.revokeObjectURL(url); objectUrls.clear(); root.replaceChildren();

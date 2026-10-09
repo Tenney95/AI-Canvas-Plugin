@@ -66,10 +66,21 @@ function mockMentionRenderer(container, onCommit) {
   };
   doc.renderers.push(renderer); return renderer;
 }
+function mockSelectRenderer(container, options) {
+  const doc = container.ownerDocument;
+  const select = doc.createElement('select'); select.dataset.field = options.name;
+  select.value = options.value; select.disabled = options.disabled;
+  for (const option of options.options) { const node = doc.createElement('option'); node.value = option.value; node.textContent = option.label; select.append(node); }
+  select.addEventListener('change', () => { if (!select.disabled) options.onChange(select.value); });
+  container.append(select);
+  const renderer = { options, disposals: 0, dispose() { this.disposals++; container.replaceChildren(); } };
+  doc.selectRenderers.push(renderer); return renderer;
+}
 function runtime() {
   const events = new Map(); const revoked = []; const blobs = [];
   const timers = new Map(); let nextTimer = 0;
-  const doc = { renderers: [], createElement: (tag) => new Element(tag, doc) };
+  const doc = { selectRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
+  doc.documentElement = new Element('html', doc);
   const window = {
     __AI_CANVAS_PLUGIN_HOST__: { exports: {} },
     addEventListener(name, fn) { if (!events.has(name)) events.set(name, new Set()); events.get(name).add(fn); },
@@ -81,10 +92,10 @@ function runtime() {
     createObjectURL: (blob) => { blobs.push(blob); return 'blob:test-preview'; }, revokeObjectURL: (url) => revoked.push(url),
   } });
   // Test-only injection: production bundle exports only its mount function.
-  const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedPickerCss = ''; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
+  const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedUiKitCss = ''; const sharedPickerCss = ''; const createSelectRenderer = ${mockSelectRenderer.toString()}; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
   new Script(executable.replace('const bridge = window.__AI_CANVAS_PLUGIN_HOST__;',
     'globalThis.helpers = { validateShots, planSamples, parseModelResponse, nodeCount, buildPrompt, generationParameters, mentionRange, mentionItems, segmentLimit, planSegments }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
-  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, timers,
+  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, timers,
     fireTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback(); } };
 }
 function props(overrides = {}) {
@@ -589,4 +600,20 @@ test('editable source imports the actual shared picker and generated artifact st
   assert.match(source, /import sharedPickerCss from '@host\/mention-picker\.css'/);
   const artifact = await readFile(new URL('../ui.js', import.meta.url)); assert.ok(artifact.length <= 2 * 1024 * 1024);
   new Script(new TextDecoder('utf-8', { fatal: true }).decode(artifact));
+});
+
+
+test('shared selects retain values across theme changes, disable during initialization and unmount with the view', async () => {
+  const ui = runtime(); const options = props({ parameters: { uiMode: 'quick' } }); const cleanup = ui.mount(ui.root, options);
+  assert.ok(ui.selectRenderers.some((renderer) => renderer.options.disabled));
+  await flush();
+  const ready = ui.selectRenderers.filter((renderer) => !renderer.disposals);
+  assert.ok(ready.length > 0);
+  assert.ok(ready.every((renderer) => renderer.options.fixedMenu && !renderer.options.disabled));
+  select(ui.root, 'audio-mode', 'mute');
+  options.theme = 'light'; for (const callback of ui.events.get('ai-canvas-theme-change')) callback();
+  assert.ok(ready.every((renderer) => renderer.disposals === 1));
+  assert.equal(find(ui.root, (item) => item.dataset.field === 'audio-mode').value, 'mute');
+  assert.equal(ui.root.ownerDocument.documentElement.dataset.theme, 'light');
+  cleanup(); assert.ok(ui.selectRenderers.every((renderer) => renderer.disposals === 1));
 });
