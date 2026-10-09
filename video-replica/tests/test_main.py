@@ -252,6 +252,43 @@ class GenerationTests(unittest.TestCase):
                 plugin.replicate(invalid)
 
 
+class SegmentTests(unittest.TestCase):
+    def value(self, duration=30, target=None):
+        value = invocation()
+        value["parameters"]["operation"] = "replicate-segment"
+        value["parameters"]["shots"][0]["outPoint"] = duration
+        if target is not None:
+            value["parameters"]["shots"][0]["referenceDuration"] = target
+        value["parameters"]["generation"] = {"backend": "materials"}
+        return value
+
+    def test_segment_operation_accepts_thirty_seconds_without_expanding_manual_limits(self):
+        result = plugin.replicate(self.value())
+        self.assertEqual(result["data"]["nodes"][0]["data"]["shotlistRows"][0]["duration"], 30)
+        self.assertFalse(any(node["nodeType"] == "ai-video" for node in result["data"]["nodes"]))
+        with self.assertRaisesRegex(plugin.ReplicaError, "15"):
+            plugin.replicate(invocation(shots=[{"key": "manual", "inPoint": 0, "outPoint": 30}]))
+
+    def test_reference_padding_is_legal_only_for_segments_and_never_shortens_source(self):
+        options = plugin._normalise(self.value(2.5, 5)["parameters"])
+        self.assertEqual(options["shots"][0]["referenceDuration"], 5)
+        for source, target in ((31, 31), (2, 1), (2, 31), (2, True), (2, float("inf"))):
+            with self.subTest(source=source, target=target), self.assertRaises(plugin.ReplicaError):
+                plugin.replicate(self.value(source, target))
+        value = invocation()
+        value["parameters"]["shots"][0]["referenceDuration"] = 5
+        with self.assertRaisesRegex(plugin.ReplicaError, "延长"):
+            plugin.replicate(value)
+
+    def test_segment_operation_rejects_direct_video_generation(self):
+        value = self.value()
+        value["models"] = [{"id": "video", "provider": "relay", "category": "video"}]
+        value["parameters"]["generation"] = {"backend": "model", "modelId": "video"}
+        with patch.object(plugin, "_run_worker") as worker, self.assertRaisesRegex(plugin.ReplicaError, "宿主任务"):
+            plugin.replicate(value)
+        worker.assert_not_called()
+
+
 class DownloadSetupTests(unittest.TestCase):
     """权重准备脚本下载器：网络以固定字节替换，验证损坏文件不能入缓存。"""
 
@@ -420,6 +457,30 @@ def run_many(configs):
                                 "outputDir": str(self.output)}
         with self.assertRaisesRegex(plugin.ReplicaError, "超出"):
             plugin.replicate(value)
+
+    def test_real_segment_padding_freezes_tail_and_keeps_control_silent(self):
+        import cv2
+        value = invocation(["canny"])
+        value["parameters"]["operation"] = "replicate-segment"
+        value["parameters"]["shots"][0]["referenceDuration"] = 3
+        value["nativeMedia"] = {"inputFiles": {"video-resource": str(self.source)}, "outputDir": str(self.output)}
+        result = plugin.replicate(value)
+        path = self.output / result["artifacts"][0]["fileName"]
+        cap = cv2.VideoCapture(str(path))
+        try:
+            self.assertAlmostEqual(cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS), 3, delta=.1)
+            cap.set(cv2.CAP_PROP_POS_MSEC, 1800)
+            ok_a, frame_a = cap.read()
+            cap.set(cv2.CAP_PROP_POS_MSEC, 2700)
+            ok_b, frame_b = cap.read()
+            self.assertTrue(ok_a and ok_b)
+            self.assertLess(float(cv2.absdiff(frame_a, frame_b).mean()), 1)
+        finally:
+            cap.release()
+        probe = shutil.which("ffprobe")
+        if probe:
+            streams = json.loads(subprocess.check_output([probe, "-v", "error", "-show_streams", "-of", "json", str(path)]))
+            self.assertFalse(any(stream["codec_type"] == "audio" for stream in streams["streams"]))
 
 
 if __name__ == "__main__":

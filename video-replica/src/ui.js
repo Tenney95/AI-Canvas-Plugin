@@ -31,7 +31,7 @@ function createMentionRenderer(container, onCommit) {
 /* Self-contained UI. All media and model operations use the host props bridge. */
 (function () {
   'use strict';
-  const LIMITS = { shots: 6, duration: 15, nodes: 25, samples: 24, modelCalls: 4, previewBytes: 16 * 1024 * 1024 };
+  const LIMITS = { shots: 6, duration: 15, nodes: 25, samples: 24, modelCalls: 4, previewBytes: 16 * 1024 * 1024, previewChunkBytes: 180 * 1024 };
   const STRINGS = {
     'zh-CN': {
       title: '参考视频 → 复刻素材', subtitle: '保留镜头节奏、构图和动作，替换角色、场景与风格。',
@@ -39,6 +39,8 @@ function createMentionRenderer(container, onCommit) {
       localeFallback: '当前语言暂无完整翻译，界面使用 English。', loading: '读取视频元数据与缩略图…',
       ready: '预览已就绪。设置扫描区间，检测后人工校正镜头。', source: '参考视频', thumbnails: '视频缩略图',
       play: '加载播放预览（≤16 MiB）', playLimit: '文件超过播放预览限额，仍可使用抽帧预览。',
+      playLoading: '正在加载播放预览…', playReady: '播放预览已就绪。',
+      playReadError: '播放预览读取失败；请重新打开面板后再试，抽帧预览仍可使用。',
       playError: '播放预览不可用；抽帧预览仍可使用。', range: '扫描区间（秒）', start: '起点', end: '终点',
       detect: '检测镜头', detecting: '本地检测镜头…', add: '添加镜头', detected: '已检测镜头，请核对切点与选中范围。',
       settings: '复刻要求', character: '替换角色', characterHint: '留空保留原角色；例如：穿红色风衣的短发女性',
@@ -83,6 +85,8 @@ function createMentionRenderer(container, onCommit) {
       localeFallback: 'This language is not fully translated; the interface uses English.', loading: 'Reading metadata and thumbnails…',
       ready: 'Preview ready. Choose a range, detect shots, then review the boundaries.', source: 'Reference video', thumbnails: 'Video thumbnails',
       play: 'Load playback preview (≤16 MiB)', playLimit: 'File exceeds the playback limit; frame previews remain available.',
+      playLoading: 'Loading playback preview…', playReady: 'Playback preview is ready.',
+      playReadError: 'Playback preview could not be read. Reopen the panel to retry; extracted frame previews remain available.',
       playError: 'Playback unavailable; extracted frame previews remain available.', range: 'Scan range (seconds)', start: 'Start', end: 'End',
       detect: 'Detect shots', detecting: 'Detecting shots locally…', add: 'Add shot', detected: 'Shots detected. Review cuts and selection.',
       settings: 'Replica requirements', character: 'Replace character', characterHint: 'Leave empty to keep the original character',
@@ -122,9 +126,54 @@ function createMentionRenderer(container, onCommit) {
       mentionTextLimit: 'The reference exceeds the text limit. Shorten the text first.',
     },
   };
+  Object.assign(STRINGS['zh-CN'], {
+    quickTitle: '一键复刻完整视频', quickHint: '自动准备控制视频、识别对白、逐段生成并合成。也可以打点指定切分位置。',
+    quickReady: '参考视频已就绪。选择模型后可直接复刻完整视频。', quickStart: '一键复刻',
+    quickControlHint: '深度/骨架需要预备本机 ReShot 与权重。宿主检查所选模型的参考视频能力，再生成素材与视频。',
+    advanced: '高级：手动镜头与物料', quickBack: '返回一键复刻', timeline: '生成段时间轴', cutTime: '打点位置（秒）',
+    addCut: '添加切点', addPlaybackCut: '在当前播放位置打点', removeCut: '删除切点', clearCuts: '恢复自动分段',
+    cutsHint: '首尾自动保留；手动区间超过模型上限时会继续拆分，完整覆盖原片。',
+    segmentSeconds: '每段最长（秒）', durationUnknown: '此模型/工作流未声明时长能力，请确认下面的段长符合其设置。',
+    incompatibleVideo: '所选模型不支持参考视频，无法使用控制视频，请更换模型。',
+    quickAudio: '成片音频', originalAudio: '保留原片对白、音乐与环境音', modelAudio: '使用模型生成音频', muteAudio: '静音',
+    audioHint: '保留原声会覆盖生成片段的音轨；替换角色不会自动克隆或改变声音。',
+    transcribe: '提取原声并转写对白', transcribeHint: '使用应用本地语音识别。转写文本用于提示词和对白文档；无需先手工操作。',
+    estimated: '预计生成', segments: '段', feeHint: '每段会调用视频模型，视觉分析也可能产生费用。',
+    startingJob: '正在检查素材、模型与完整分段…', speechRequired: '本地语音模型尚未就绪。首次使用需下载语音模型，再继续复刻。',
+    downloadSpeech: '下载语音模型并继续', jobProgress: '复刻进度', cancelJob: '停止任务', jobContinues: '关闭面板后任务由宿主继续；可在画布查看生成片段和成片。',
+    invalidCuts: '切点须为原片内部的有效秒数，不能重复。完整视频最多 300 秒、64 个生成段。', jobInvalid: '宿主返回了无效任务状态，请检查应用版本。',
+    refreshJob: '查询任务状态',
+    unknownJob: '提交状态不确定，请核对已有片段与厂商任务，避免重复付费。',
+    succeededJob: '完整复刻已完成，成片已写回画布。', failedJob: '任务未完成，已生成片段保留在画布。',
+    cancelledJob: '任务已停止，已生成片段保留在画布。', pausedJob: '任务已暂停，请在宿主检查已有片段。',
+    cutPlaybackMissing: '请先加载播放预览，或使用时间轴/秒数输入打点。',
+  });
+  Object.assign(STRINGS['en-US'], {
+    quickTitle: 'Replicate the complete video', quickHint: 'Prepare controls, transcribe dialogue, generate segments and compose automatically. Optional cuts control segment boundaries.',
+    quickReady: 'Reference ready. Choose a model and replicate the complete video.', quickStart: 'Replicate video',
+    quickControlHint: 'Depth/pose require prepared local ReShot weights. The host checks model reference-video capabilities before preparing materials and generating videos.',
+    advanced: 'Advanced: shots and materials', quickBack: 'Back to one-click replication', timeline: 'Generation timeline', cutTime: 'Cut position (seconds)',
+    addCut: 'Add cut', addPlaybackCut: 'Cut at playback position', removeCut: 'Remove cut', clearCuts: 'Reset automatic segments',
+    cutsHint: 'Start and end are kept automatically. Intervals above the model limit are split further; the entire source is covered.',
+    segmentSeconds: 'Maximum segment (seconds)', durationUnknown: 'This model/workflow has no declared duration capability. Confirm the segment length matches its settings.',
+    incompatibleVideo: 'This model cannot accept reference video. Choose a model that supports control videos.',
+    quickAudio: 'Final audio', originalAudio: 'Keep original dialogue, music and ambience', modelAudio: 'Use generated audio', muteAudio: 'Mute',
+    audioHint: 'Original audio replaces generated audio. Replacing a character does not clone or change the voice.',
+    transcribe: 'Extract audio and transcribe dialogue', transcribeHint: 'Uses the app’s local speech recognizer. Text is used for prompts and a dialogue document.',
+    estimated: 'Estimated generation', segments: 'segments', feeHint: 'Each segment calls the video model. Visual analysis may incur additional fees.',
+    startingJob: 'Checking materials, model and complete segmentation…', speechRequired: 'Local speech models are not ready. Download them once to continue replication.',
+    downloadSpeech: 'Download speech models and continue', jobProgress: 'Replication progress', cancelJob: 'Stop task', jobContinues: 'The host continues the task after closing this panel. Generated segments and final output appear on the canvas.',
+    invalidCuts: 'Cuts must be unique times inside the source. The complete video limit is 300 seconds and 64 segments.', jobInvalid: 'The host returned an invalid task state. Check the app version.',
+    refreshJob: 'Refresh task status',
+    unknownJob: 'Submission status is unknown. Check existing segments and provider tasks before making another paid request.',
+    succeededJob: 'Complete replica saved to the canvas.', failedJob: 'Task incomplete. Generated segments remain on the canvas.',
+    cancelledJob: 'Task stopped. Generated segments remain on the canvas.', pausedJob: 'Task paused. Check existing segments in the host.',
+    cutPlaybackMissing: 'Load playback first, or add cuts with the timeline/time input.',
+  });
   const CSS = `
+    .vr-viewport { width: 100%; height: 100vh; height: 100dvh; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
     .vr { --ui-control-h: 28px; --ui-radius: 8px; --ui-radius-md: 7px; --ui-pad: 12px; --ui-pad-sm: 8px;
-      color-scheme: dark; box-sizing: border-box; min-width: 0; max-width: 1120px; margin: auto;
+      color-scheme: dark; box-sizing: border-box; width: 100%; min-width: 0; min-height: 100%; margin: 0; align-content: start;
       padding: var(--ui-pad); color: var(--theme-text); background: var(--theme-bg); font: 12px/1.6 system-ui, sans-serif; }
     .vr[data-theme='light'] { color-scheme: light; }
     .vr *, .vr *::before, .vr *::after { box-sizing: border-box; }
@@ -132,7 +181,7 @@ function createMentionRenderer(container, onCommit) {
     .vr .ui-card__header, .vr .ui-card__body, .vr .ui-card__footer { padding: var(--ui-pad); }
     .vr .ui-card__header { border-bottom: 1px solid var(--theme-border); }
     .vr .ui-card__title { margin: 0; font-size: 14px; font-weight: 600; }
-    .vr .ui-card__desc, .vr .ui-text-muted { color: var(--theme-text-muted); }
+    .vr .ui-card__desc, .vr .ui-text-muted { color: var(--theme-text-muted); overflow-wrap: anywhere; }
     .vr .ui-btn { display: inline-flex; align-items: center; justify-content: center; min-height: var(--ui-control-h); padding: 0 8px;
       border: 1px solid var(--theme-border); border-radius: var(--ui-radius-md); background: var(--theme-surface); color: var(--theme-text);
       font: inherit; cursor: pointer; white-space: nowrap; }
@@ -162,6 +211,10 @@ function createMentionRenderer(container, onCommit) {
     .vr .vr-shot__grid { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 12px; }
     .vr .vr-footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
     .vr .vr-summary { margin-right: auto; color: var(--theme-text-secondary); }
+    .vr .vr-timeline { width: 100%; accent-color: var(--brand); }
+    .vr .vr-segments { display: flex; flex-wrap: wrap; gap: 4px; }
+    .vr .vr-segment { padding: 4px 8px; border-radius: var(--ui-radius-md); background: var(--theme-surface); border: 1px solid var(--theme-border); }
+    .vr .vr-progress { width: 100%; accent-color: var(--brand); }
     .vr .ui-field:has(textarea) { position: relative; }
     .vr .vr-mentions { position: absolute; left: 0; width: min(336px, 100%); z-index: 40;
       padding: 0; gap: 4px; max-height: calc(100vh - 24px); overflow-y: auto; background: var(--theme-surface); box-shadow: 0 20px 48px var(--black-alpha-50); }
@@ -171,6 +224,28 @@ function createMentionRenderer(container, onCommit) {
     .vr input[type='checkbox'] { accent-color: var(--brand); }
     @media (max-width: 720px) { .vr .vr-grid, .vr .vr-shot__grid { grid-template-columns: minmax(0, 1fr); } }
   `;
+
+  function segmentLimit(model, fallback = 15) {
+    const capability = model?.videoCapability;
+    const candidates = [capability?.maxDuration,
+      Array.isArray(capability?.durations) ? Math.max(...capability.durations) : undefined];
+    const known = candidates.filter((value) => Number.isFinite(value) && value > 0);
+    return Math.min(30, ...(known.length ? known : [fallback]));
+  }
+  function planSegments(duration, cuts, maximum) {
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 300 || !Number.isFinite(maximum) || maximum <= 0 || maximum > 30
+      || !Array.isArray(cuts) || cuts.length > 63 || cuts.some((cut) => !Number.isFinite(cut) || cut <= 0 || cut >= duration)) throw new Error('invalidCuts');
+    const sorted = [...cuts].sort((a, b) => a - b);
+    if (sorted.some((cut, index) => index && cut - sorted[index - 1] < .001)) throw new Error('invalidCuts');
+    const points = [0, ...sorted, duration], result = [];
+    for (let index = 1; index < points.length; index++) {
+      const start = points[index - 1], end = points[index];
+      const count = Math.ceil((end - start - 1e-9) / maximum);
+      for (let part = 0; part < count; part++) result.push({ inPoint: start + part * maximum, outPoint: Math.min(end, start + (part + 1) * maximum) });
+    }
+    if (result.length > 64) throw new Error('invalidCuts');
+    return result;
+  }
 
   function mentionRange(value, start, end) {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > value.length) return null;
@@ -292,19 +367,30 @@ function createMentionRenderer(container, onCommit) {
   const bridge = window.__AI_CANVAS_PLUGIN_HOST__;
   bridge.exports.VideoReplica = function mount(root, props) {
     const doc = root.ownerDocument;
+    root.classList.toggle('vr-viewport', true);
     const state = { disposed: false, sequence: 0, busy: false, shots: [], thumbnails: [], duration: 0,
       width: 0, height: 0, start: 0, end: 15, controls: new Set(['depth']), character: '', scene: '', style: '',
       model: '', calls: 0, status: '', error: false, playback: '', playbackAttempted: false, nextKey: 0,
-      generationBackend: 'materials', videoModel: '', aspectRatio: '', resolution: '', generateAudio: false };
+      generationBackend: 'materials', videoModel: '', aspectRatio: '', resolution: '', generateAudio: false,
+      advanced: props.parameters?.uiMode === 'advanced', quickModel: '', cuts: [], cutTime: 0, maxSegmentSeconds: 15,
+      audioMode: 'original', transcribe: true, job: null, jobRequest: false, speechRequired: false, playbackTime: 0 };
     const video = (props.resources?.self || []).find((resource) => resource.origin === 'node-self'
       && resource.source?.nodeId === props.node.id && typeof resource.mediaType === 'string' && resource.mediaType.startsWith('video/'));
     const models = (props.models || []).filter((model) => model.category === 'text' && (!model.inputModalities || model.inputModalities.includes('image')));
     const videoModels = (props.models || []).filter((model) => model.category === 'video');
+    const quickVideoModels = videoModels.filter((model) => /^(general|comfyui|volcengine)\//.test(model.id));
+    state.quickModel = quickVideoModels.find((model) => model.videoCapability?.maxVideoReferences !== 0)?.id || '';
+    state.model = models[0]?.id || '';
     const objectUrls = new Set();
+    let playbackElement = null;
+    let jobTimer = null; let pollAttempts = 0; let pollFailures = 0; let pollInFlight = false;
     let domListeners = [];
     let activeMention = null; let mentionCounter = 0; let mentionSource = 'nodes'; let mentionInFlight = false; let queuedMention = null;
     const t = (key) => (STRINGS[props.locale] || STRINGS['en-US'])[key] || key;
     const selected = () => state.shots.filter((shot) => shot.selected);
+    const jobTerminal = () => Boolean(state.job && ['succeeded', 'failed', 'cancelled', 'paused', 'unknown'].includes(state.job.status));
+    const jobActive = () => Boolean(state.job && !jobTerminal());
+    const locked = () => state.busy || state.jobRequest || Boolean(state.job);
     const alive = (sequence) => { if (state.disposed || sequence !== state.sequence) throw new Error('stale'); };
     function element(tag, className, content) {
       const node = doc.createElement(tag); if (className) node.className = className;
@@ -315,7 +401,7 @@ function createMentionRenderer(container, onCommit) {
     }
     function button(label, fn, primary, identifier) {
       const node = element('button', `ui-btn${primary ? ' ui-btn--primary' : ''}`, label);
-      node.type = 'button'; node.disabled = state.busy || Boolean(props.busy);
+      node.type = 'button'; node.disabled = locked() || Boolean(props.busy);
       if (identifier) node.dataset.action = identifier;
       listen(node, 'click', () => { void perform(fn, identifier); }); return node;
     }
@@ -324,9 +410,10 @@ function createMentionRenderer(container, onCommit) {
       const input = element(type === 'textarea' ? 'textarea' : 'input', type === 'textarea' ? 'ui-textarea' : 'ui-input');
       input.setAttribute('aria-label', label);
       if (type && type !== 'textarea') input.type = type;
-      input.value = String(value); input.disabled = state.busy; if (placeholder) input.placeholder = placeholder;
+      input.value = String(value); input.disabled = locked(); if (placeholder) input.placeholder = placeholder;
       if (identifier) input.dataset.field = identifier;
       if (type === 'number') { input.step = '0.001'; input.min = '0'; input.max = String(state.duration); }
+      if (identifier === 'segment-seconds') { input.min = '.001'; input.max = '30'; }
       listen(input, 'input', () => { change(type === 'number' ? Number(input.value) : input.value); updateSummary(); });
       wrap.append(input);
       if (type === 'textarea' && ['character', 'scene', 'prompt'].includes(identifier)) attachMentions(input, wrap, change, identifier === 'prompt' ? 8000 : 2000);
@@ -461,7 +548,7 @@ function createMentionRenderer(container, onCommit) {
     function attachMentions(input, wrap, change, limit) {
       let composing = false;
       const sync = () => {
-        if (composing || state.busy || state.disposed) return;
+        if (composing || locked() || state.disposed) return;
         const range = mentionRange(input.value, input.selectionStart, input.selectionEnd);
         if (!range) { if (activeMention?.input === input) closeMentions(false); return; }
         if (activeMention?.input !== input) { openMentions(input, wrap, change, limit, range); return; }
@@ -474,14 +561,14 @@ function createMentionRenderer(container, onCommit) {
       listen(input, 'keydown', (event) => { if (activeMention?.input === input && !composing) mentionKeydown(activeMention, event); });
       listen(wrap, 'focusout', (event) => { if (activeMention?.input === input && !wrap.contains(event.relatedTarget)) closeMentions(false); });
       const actions = element('div', 'vr-row'); const open = element('button', 'ui-btn', '@'); open.type = 'button'; open.title = t('mention'); open.setAttribute('aria-label', t('mention')); open.dataset.mentionOpen = input.dataset.field;
-      open.disabled = state.busy; listen(open, 'mousedown', (event) => event.preventDefault());
-      listen(open, 'click', () => { if (state.busy || state.disposed) return; const start = input.selectionStart ?? input.value.length; const end = input.selectionEnd ?? start;
+      open.disabled = locked(); listen(open, 'mousedown', (event) => event.preventDefault());
+      listen(open, 'click', () => { if (locked() || state.disposed) return; const start = input.selectionStart ?? input.value.length; const end = input.selectionEnd ?? start;
         input.focus({ preventScroll: true }); openMentions(input, wrap, change, limit, mentionRange(input.value, start, end) || { start, end, query: '' }); });
       actions.append(open, element('span', 'ui-text-muted', t('mentionHint'))); wrap.append(actions);
     }
     function selectField(label, value, options, change, identifier) {
       const wrap = element('label', 'ui-field'); wrap.append(element('span', 'ui-field__label', label));
-      const select = element('select', 'ui-select__native'); select.disabled = state.busy; select.dataset.field = identifier;
+      const select = element('select', 'ui-select__native'); select.disabled = locked(); select.dataset.field = identifier;
       for (const option of options) { const node = element('option', '', option.label); node.value = option.value; select.append(node); }
       select.value = value; listen(select, 'change', () => { change(select.value); }); wrap.append(select); return wrap;
     }
@@ -491,6 +578,13 @@ function createMentionRenderer(container, onCommit) {
       const img = element('img', 'vr-media'); img.src = frame.previewDataUrl; img.alt = `${t('frame')} ${(frame.actualTime || 0).toFixed(3)}s`; return img;
     }
     function updateSummary() {
+      const quickSummary = root.querySelector('[data-quick-summary]');
+      if (quickSummary) {
+        if (state.job) quickSummary.textContent = `${t('jobProgress')}: ${state.job.completedSegments}/${state.job.totalSegments} ${t('segments')}`;
+        else try { const planned = planSegments(state.duration, state.cuts, segmentLimit(quickVideoModels.find((model) => model.id === state.quickModel), state.maxSegmentSeconds));
+          quickSummary.textContent = `${t('estimated')} ${planned.length} ${t('segments')} · ${t(`${state.audioMode}Audio`)}. ${t('feeHint')}`;
+        } catch { quickSummary.textContent = t('invalidCuts'); }
+      }
       const summary = root.querySelector('[data-summary]');
       if (summary) summary.textContent = `${t('selected')} ${selected().length}/${LIMITS.shots} · ${t('count')} ${nodeCount(selected(), [...state.controls], state.generationBackend)}/${LIMITS.nodes} · ${t('calls')} ${state.calls}/${LIMITS.modelCalls}`;
       const warning = root.querySelector('[data-budget-warning]');
@@ -519,7 +613,8 @@ function createMentionRenderer(container, onCommit) {
       if (!value?.video || !Number.isFinite(value.video.duration) || value.video.duration <= 0) throw new Error('previewError');
       state.duration = value.video.duration; state.width = value.video.width; state.height = value.video.height;
       state.end = Math.min(15, state.duration); state.thumbnails = (value.frames || []).filter((frame) => !frame.error);
-      state.status = t('ready');
+      if (state.job) applyJob(state.job);
+      else state.status = t(state.advanced ? 'ready' : 'quickReady');
     }
     async function detect(sequence) {
       if (![state.start, state.end].every(Number.isFinite) || state.start < 0 || state.end > state.duration || state.end <= state.start || state.end - state.start > 300) throw new Error('rangeError');
@@ -589,17 +684,21 @@ function createMentionRenderer(container, onCommit) {
     async function playback(sequence) {
       state.playbackAttempted = true;
       if (!Number.isSafeInteger(video.size) || video.size <= 0 || video.size > LIMITS.previewBytes) throw new Error('playLimit');
+      state.status = t('playLoading'); render();
       const chunks = [];
       try {
-        for (let offset = 0; offset < video.size; offset += 256 * 1024) {
-          const length = Math.min(256 * 1024, video.size - offset);
+        // Base64 must fit the host's 256000-character string limit as well as its range budget.
+        for (let offset = 0; offset < video.size; offset += LIMITS.previewChunkBytes) {
+          const length = Math.min(LIMITS.previewChunkBytes, video.size - offset);
           const value = await effect({ type: 'resource.readRange', resourceId: video.resourceId, offset, length }, sequence);
           if (value?.offset !== offset || value.bytes !== length || typeof value.base64 !== 'string') throw new Error('playError');
           const raw = atob(value.base64); if (raw.length !== length) throw new Error('playError');
           chunks.push(Uint8Array.from(raw, (character) => character.charCodeAt(0)));
         }
         alive(sequence); const url = URL.createObjectURL(new Blob(chunks, { type: video.mediaType })); objectUrls.add(url); state.playback = url;
-      } catch (error) { if (state.disposed) throw error; state.status = t('playError'); state.error = true; }
+        state.status = t('playReady');
+      } catch { alive(sequence); state.status = t('playReadError'); state.error = true; }
+      finally { chunks.length = 0; }
     }
     async function submit(sequence) {
       const shots = selectedForOperation(); const controls = [...state.controls];
@@ -614,23 +713,145 @@ function createMentionRenderer(container, onCommit) {
           ...(frameResourceId ? { frameResourceId, frameKey } : {}) })) });
       alive(sequence);
     }
+    function readJob(value) {
+      if (!value || typeof value.jobId !== 'string' || !value.jobId || value.jobId.length > 128
+        || !['queued', 'preparing', 'generating', 'composing', 'succeeded', 'failed', 'cancelled', 'paused', 'unknown'].includes(value.status)
+        || !Number.isInteger(value.totalSegments) || value.totalSegments < 1 || value.totalSegments > 64
+        || !Number.isInteger(value.completedSegments) || value.completedSegments < 0 || value.completedSegments > value.totalSegments
+        || !Number.isFinite(value.progress) || value.progress < 0 || value.progress > 100
+        || (value.stage !== undefined && (typeof value.stage !== 'string' || value.stage.length > 200))) throw new Error('jobInvalid');
+      return { ...value, error: typeof value.error === 'string' ? value.error.slice(0, 400) : '',
+        warnings: Array.isArray(value.warnings) ? value.warnings.filter((item) => typeof item === 'string').slice(0, 6).map((item) => item.slice(0, 300)) : [] };
+    }
+    function applyJob(value) {
+      const job = readJob(value);
+      if (state.job && state.job.jobId !== job.jobId) throw new Error('jobInvalid');
+      if (Number.isFinite(state.job?.updatedAt) && Number.isFinite(job.updatedAt) && job.updatedAt < state.job.updatedAt) return;
+      if (jobTerminal() && !['succeeded', 'failed', 'cancelled', 'paused', 'unknown'].includes(job.status)) return;
+      state.job = job; state.error = ['failed', 'unknown'].includes(job.status);
+      const terminalKeys = { succeeded: 'succeededJob', failed: 'failedJob', cancelled: 'cancelledJob', paused: 'pausedJob', unknown: 'unknownJob' };
+      state.status = terminalKeys[job.status] ? `${t(terminalKeys[job.status])}${job.error ? ` ${job.error}` : ''}` : `${t('jobProgress')}: ${job.stage || job.status}`;
+      if (jobTerminal() && jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; }
+    }
+    function schedulePoll() {
+      if (state.disposed || !jobActive() || jobTimer !== null) return;
+      jobTimer = setTimeout(() => { jobTimer = null; void pollJob(); }, pollAttempts++ < 3 ? 2000 : 5000);
+    }
+    async function pollJob() {
+      if (state.disposed || !state.job || pollInFlight) return;
+      pollInFlight = true;
+      const id = state.job.jobId;
+      try {
+        const result = await props.runEffect({ type: 'video.replicaJob.status', jobId: id });
+        if (state.disposed || state.job?.jobId !== id) return;
+        if (!result?.ok) throw new Error(result?.error || t('jobInvalid'));
+        applyJob(result.value); pollFailures = 0; render();
+      } catch (error) {
+        if (state.disposed || state.job?.jobId !== id) return;
+        pollFailures++; state.error = true; state.status = `${t('error')}: ${String(error.message || error).slice(0, 400)}`; render();
+      } finally { pollInFlight = false; }
+      if (pollFailures < 3) schedulePoll();
+    }
+    async function startJob(downloadSpeech = false) {
+      if (state.disposed || locked() || props.busy || state.job) return;
+      const model = quickVideoModels.find((item) => item.id === state.quickModel);
+      if (!model) { state.status = t('generationRequired'); state.error = true; render(); return; }
+      if (state.controls.size && model.videoCapability?.maxVideoReferences === 0) {
+        state.status = t('incompatibleVideo'); state.error = true; render(); return;
+      }
+      try { planSegments(state.duration, state.cuts, segmentLimit(model, state.maxSegmentSeconds)); }
+      catch { state.status = t('invalidCuts'); state.error = true; render(); return; }
+      state.jobRequest = true; state.error = false; state.speechRequired = false; state.status = t('startingJob'); render();
+      try {
+        const result = await props.runEffect({ type: 'video.replicaJob.start', resourceId: video.resourceId, modelId: model.id,
+          ...(state.model ? { analysisModelId: state.model } : {}), character: state.character, scene: state.scene, style: state.style,
+          controls: [...state.controls], cuts: [...state.cuts], maxSegmentSeconds: segmentLimit(model, state.maxSegmentSeconds),
+          ...(state.resolution ? { resolution: state.resolution } : {}), ...(state.aspectRatio ? { aspectRatio: state.aspectRatio } : {}),
+          audioMode: state.audioMode, transcribe: state.transcribe, ...(downloadSpeech ? { downloadSpeech: true } : {}) });
+        if (state.disposed) return;
+        if (!result?.ok) throw new Error(result?.error || t('error'));
+        if (result.value?.speechModelsRequired === true) { state.speechRequired = true; state.status = t('speechRequired'); }
+        else { applyJob(result.value); schedulePoll(); }
+      } catch (error) {
+        if (state.disposed) return;
+        state.error = true; state.status = `${t('error')}: ${String(error.message || error).slice(0, 400)}`;
+      } finally { if (!state.disposed) { state.jobRequest = false; render(); } }
+    }
+    async function cancelJob() {
+      if (state.disposed || !jobActive() || state.jobRequest) return;
+      state.jobRequest = true; render();
+      try {
+        const result = await props.runEffect({ type: 'video.replicaJob.cancel', jobId: state.job.jobId });
+        if (state.disposed) return;
+        if (!result?.ok) throw new Error(result?.error || t('error'));
+        applyJob(result.value);
+      } catch (error) { if (!state.disposed) { state.status = `${t('error')}: ${String(error.message || error).slice(0, 400)}`; state.error = true; } }
+      finally { if (!state.disposed) { state.jobRequest = false; render(); schedulePoll(); } }
+    }
+    function action(label, identifier, handler, disabled = false, primary = false) {
+      const node = element('button', `ui-btn${primary ? ' ui-btn--primary' : ''}`, label); node.type = 'button'; node.dataset.action = identifier;
+      node.disabled = disabled; listen(node, 'click', () => { if (!node.disabled) void handler(); }); return node;
+    }
+    function addCut(value) {
+      const rounded = Math.round(value * 1000) / 1000;
+      try { planSegments(state.duration, [...state.cuts, rounded], segmentLimit(quickVideoModels.find((model) => model.id === state.quickModel), state.maxSegmentSeconds));
+        state.cuts = [...state.cuts, rounded].sort((a, b) => a - b); state.error = false;
+      } catch { state.status = t('invalidCuts'); state.error = true; }
+      render();
+    }
+    function renderTimeline() {
+      const section = element('div', 'vr-stack'); section.append(element('h3', 'ui-card__title', t('timeline')));
+      const slider = element('input', 'vr-timeline'); slider.type = 'range'; slider.min = '0'; slider.max = String(state.duration); slider.step = '.001'; slider.value = String(state.cutTime);
+      slider.disabled = locked(); slider.dataset.field = 'cut-timeline'; slider.setAttribute('aria-label', t('cutTime'));
+      listen(slider, 'input', () => { state.cutTime = Number(slider.value); if (playbackElement) playbackElement.currentTime = state.cutTime;
+        const input = root.querySelector('[data-field="cut-time"]'); if (input) input.value = String(state.cutTime); });
+      section.append(slider, field(t('cutTime'), state.cutTime, (value) => { state.cutTime = value; slider.value = String(value); }, 'number', '', 'cut-time'));
+      const actions = element('div', 'vr-row'); actions.append(action(t('addCut'), 'add-cut', () => addCut(state.cutTime), locked()),
+        action(t('addPlaybackCut'), 'add-playback-cut', () => { if (playbackElement) addCut(playbackElement.currentTime); else { state.status = t('cutPlaybackMissing'); state.error = true; render(); } }, locked()),
+        action(t('clearCuts'), 'clear-cuts', () => { state.cuts = []; render(); }, locked() || !state.cuts.length)); section.append(actions);
+      const cuts = element('div', 'vr-row');
+      for (const cut of state.cuts) cuts.append(action(`${cut.toFixed(3)}s ×`, `remove-cut-${cut}`, () => { state.cuts = state.cuts.filter((value) => value !== cut); render(); }, locked()));
+      section.append(cuts, element('p', 'ui-text-muted', t('cutsHint')));
+      const spans = element('div', 'vr-segments'); spans.dataset.segments = '';
+      try { for (const [index, segment] of planSegments(state.duration, state.cuts, segmentLimit(quickVideoModels.find((model) => model.id === state.quickModel), state.maxSegmentSeconds)).entries())
+        spans.append(element('span', 'vr-segment', `${index + 1}: ${segment.inPoint.toFixed(3)}–${segment.outPoint.toFixed(3)}s`)); }
+      catch { spans.append(element('span', 'ui-text-muted', t('invalidCuts'))); }
+      section.append(spans); return section;
+    }
     function render() {
       if (state.disposed) return;
+      const scrollTop = root.scrollTop || 0;
       closeMentions(false);
       for (const dispose of domListeners) dispose(); domListeners = [];
+      stopPlaybackElement();
       root.replaceChildren(); const container = element('div', 'vr vr-stack'); container.dataset.theme = props.theme;
       const style = element('style'); style.textContent = sharedBaseCss + sharedPickerCss + CSS; container.append(style);
-      const heading = element('div', 'vr-stack'); heading.append(element('h1', '', t('title')), element('p', 'ui-text-muted', t('subtitle'))); container.append(heading);
+      const heading = element('div', 'vr-stack'); heading.append(element('h1', '', t(state.advanced ? 'title' : 'quickTitle')), element('p', 'ui-text-muted', t(state.advanced ? 'subtitle' : 'quickHint'))); container.append(heading);
       if (!STRINGS[props.locale]) container.append(element('p', 'ui-alert', t('localeFallback')));
+      if (state.job && (!video || props.parameters?.replicaJob)) {
+        const feedback = element('p', `ui-alert${state.error ? ' is-error' : ''}`, state.status); feedback.setAttribute('role', state.error ? 'alert' : 'status');
+        feedback.setAttribute('aria-live', state.error ? 'assertive' : 'polite'); container.append(feedback);
+        const progress = element('progress', 'vr-progress'); progress.max = 1; progress.value = state.job.progress > 1 ? state.job.progress / 100 : state.job.progress;
+        progress.setAttribute('aria-label', t('jobProgress')); container.append(progress,
+          element('p', 'ui-text-muted', `${state.job.completedSegments}/${state.job.totalSegments} · ${Math.round(progress.value * 100)}%`), element('p', 'ui-text-muted', t('jobContinues')));
+        for (const warning of state.job.warnings) container.append(element('p', 'ui-alert', warning));
+        const footer = element('div', 'vr-footer'); footer.append(action(t('close'), 'close', () => props.close(), false),
+          action(t('refreshJob'), 'refresh-job', () => { if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; } void pollJob(); }, state.jobRequest));
+        if (jobActive()) footer.append(action(t('cancelJob'), 'cancel-job', cancelJob, state.jobRequest));
+        container.append(footer); root.append(container); root.scrollTop = scrollTop; return;
+      }
       if (!video) { container.append(element('p', 'ui-alert is-error', t('resourceMissing'))); root.append(container); return; }
-      container.setAttribute('aria-busy', String(state.busy));
-      if (state.status) { const status = element('p', `ui-alert${state.error ? ' is-error' : ''}`, state.status); container.append(status); }
+      container.setAttribute('aria-busy', String(state.busy || state.jobRequest));
+      if (state.status) { const status = element('p', `ui-alert${state.error ? ' is-error' : ''}`, state.status);
+        status.setAttribute('role', state.error ? 'alert' : 'status'); status.setAttribute('aria-live', state.error ? 'assertive' : 'polite'); container.append(status); }
       const grid = element('div', 'vr-grid'); const source = element('section', 'ui-card');
       const sourceHeader = element('div', 'ui-card__header'); sourceHeader.append(element('h2', 'ui-card__title', t('source')),
         element('p', 'ui-card__desc', `${video.displayName} · ${state.duration.toFixed(3)}s · ${state.width}×${state.height}`)); source.append(sourceHeader);
       const sourceBody = element('div', 'ui-card__body vr-stack');
       if (state.playback) {
         const player = element('video', 'vr-media'); player.controls = true; player.preload = 'metadata'; player.src = state.playback;
+        playbackElement = player;
+        listen(player, 'loadedmetadata', () => { if (state.playbackTime > 0 && Number.isFinite(player.duration)) player.currentTime = Math.min(state.playbackTime, player.duration); });
         listen(player, 'error', () => {
           if (state.disposed) return;
           URL.revokeObjectURL(state.playback); objectUrls.delete(state.playback); state.playback = '';
@@ -642,20 +863,24 @@ function createMentionRenderer(container, onCommit) {
       sourceBody.append(strip);
       const play = button(t('play'), playback, false, 'play'); play.disabled ||= state.playbackAttempted || video.size > LIMITS.previewBytes; sourceBody.append(play);
       if (video.size > LIMITS.previewBytes) sourceBody.append(element('p', 'ui-text-muted', t('playLimit')));
+      if (state.advanced) {
       const range = element('div', 'vr-pair'); range.append(field(t('start'), state.start, (value) => { state.start = value; }, 'number', '', 'range-start'),
         field(t('end'), state.end, (value) => { state.end = value; }, 'number', '', 'range-end')); sourceBody.append(element('p', 'ui-field__label', t('range')), range);
       const scan = element('div', 'vr-row'); scan.append(button(t('detect'), detect, false, 'detect'), button(t('add'), () => {
         const start = Math.max(state.start, selected().reduce((maximum, shot) => Math.max(maximum, shot.outPoint), state.start));
         if (!state.duration || start >= state.duration) throw new Error('bounds');
         state.shots.push({ key: `shot${++state.nextKey}`, inPoint: start, outPoint: Math.min(start + 3, state.duration), selected: selected().length < 6, description: '', prompt: '' });
-      }, false, 'add')); sourceBody.append(scan); source.append(sourceBody); grid.append(source);
+      }, false, 'add')); sourceBody.append(scan);
+      } else sourceBody.append(renderTimeline());
+      source.append(sourceBody); grid.append(source);
       const settings = element('section', 'ui-card'); const settingsHeader = element('div', 'ui-card__header'); settingsHeader.append(element('h2', 'ui-card__title', t('settings'))); settings.append(settingsHeader);
       const settingsBody = element('div', 'ui-card__body vr-stack');
       for (const key of ['character', 'scene', 'style']) settingsBody.append(field(t(key), state[key], (value) => { state[key] = value.slice(0, 2000); }, 'textarea', t(`${key}Hint`), key));
       settingsBody.append(element('p', 'ui-field__label', t('controls'))); const controls = element('div', 'vr-row');
-      for (const key of ['depth', 'pose', 'canny']) { const label = element('label'); const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = state.controls.has(key); checkbox.disabled = state.busy; checkbox.dataset.control = key;
+      for (const key of ['depth', 'pose', 'canny']) { const label = element('label'); const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = state.controls.has(key); checkbox.disabled = locked(); checkbox.dataset.control = key;
         listen(checkbox, 'change', () => { if (checkbox.checked) state.controls.add(key); else state.controls.delete(key); updateSummary(); }); label.append(checkbox, element('span', '', t(key))); controls.append(label); }
-      settingsBody.append(controls, element('p', 'ui-text-muted', t('controlHint')));
+      settingsBody.append(controls, element('p', 'ui-text-muted', t(state.advanced ? 'controlHint' : 'quickControlHint')));
+      if (state.advanced) {
       const modelLabel = element('label', 'ui-field'); modelLabel.append(element('span', 'ui-field__label', t('model'))); const select = element('select', 'ui-select__native'); select.disabled = state.busy; select.dataset.field = 'model';
       const empty = element('option', '', t('chooseModel')); empty.value = ''; select.append(empty);
       for (const model of models) { const option = element('option', '', `${model.name} · ${model.provider}`); option.value = model.id; select.append(option); }
@@ -679,7 +904,34 @@ function createMentionRenderer(container, onCommit) {
         listen(checkbox, 'change', () => { state.generateAudio = checkbox.checked; }); audio.append(checkbox, element('span', '', t('audio'))); settingsBody.append(audio, element('p', 'ui-text-muted', t('generationHint')));
         if (state.generationBackend === 'comfyui') settingsBody.append(element('p', 'ui-text-muted', t('comfyHint')));
       }
+      } else {
+        settingsBody.append(selectField(t('generationModel'), state.quickModel,
+          [{ value: '', label: t('chooseVideo') }, ...quickVideoModels.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider}${model.videoCapability?.maxVideoReferences === 0 ? ' · ⚠' : ''}` }))],
+          (value) => { state.quickModel = value; render(); }, 'quick-model'));
+        if (!quickVideoModels.length) settingsBody.append(element('p', 'ui-alert', t('noVideo')));
+        const chosen = quickVideoModels.find((model) => model.id === state.quickModel);
+        if (!chosen?.videoCapability?.maxDuration && !chosen?.videoCapability?.durations?.length) {
+          settingsBody.append(element('p', 'ui-text-muted', t('durationUnknown')),
+            field(t('segmentSeconds'), state.maxSegmentSeconds, (value) => { state.maxSegmentSeconds = value; }, 'number', '', 'segment-seconds'));
+        }
+        settingsBody.append(selectField(t('model'), state.model,
+          [{ value: '', label: t('optional') }, ...models.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider}` }))],
+          (value) => { state.model = value; }, 'model'));
+        settingsBody.append(selectField(t('quickAudio'), state.audioMode,
+          ['original', 'model', 'mute'].map((value) => ({ value, label: t(`${value}Audio`) })),
+          (value) => { state.audioMode = value; updateSummary(); }, 'audio-mode'), element('p', 'ui-text-muted', t('audioHint')));
+        const audio = element('label'); const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = state.transcribe; checkbox.disabled = locked(); checkbox.dataset.field = 'transcribe';
+        listen(checkbox, 'change', () => { state.transcribe = checkbox.checked; }); audio.append(checkbox, element('span', '', t('transcribe')));
+        settingsBody.append(audio, element('p', 'ui-text-muted', t('transcribeHint')));
+        const params = element('div', 'vr-pair'); params.append(selectField(t('aspectRatio'), state.aspectRatio,
+          [{ value: '', label: t('modelDefault') }, ...['1:1', '16:9', '9:16', '4:3', '3:4', '21:9', 'adaptive'].map((value) => ({ value, label: value }))],
+          (value) => { state.aspectRatio = value; }, 'generation-ratio'), selectField(t('resolution'), state.resolution,
+          [{ value: '', label: t('modelDefault') }, ...['480p', '720p', '1080p'].map((value) => ({ value, label: value }))],
+          (value) => { state.resolution = value; }, 'generation-resolution')); settingsBody.append(params);
+        if (chosen?.provider === 'comfyui') settingsBody.append(element('p', 'ui-text-muted', t('comfyHint')));
+      }
       settings.append(settingsBody); grid.append(settings); container.append(grid);
+      if (state.advanced) {
       const shotSection = element('section', 'vr-stack'); shotSection.append(element('h2', 'ui-card__title', t('shots')), element('p', 'ui-text-muted', t('shotHint')));
       if (!state.shots.length) shotSection.append(element('p', 'ui-alert', t('noShots')));
       for (const [index, shot] of state.shots.entries()) {
@@ -701,7 +953,30 @@ function createMentionRenderer(container, onCommit) {
       const feedback = element('p', `ui-alert${state.error ? ' is-error' : ''}`, state.status); feedback.dataset.feedback = '';
       feedback.setAttribute('role', state.error ? 'alert' : 'status'); feedback.setAttribute('aria-live', state.error ? 'assertive' : 'polite');
       feedback.setAttribute('aria-atomic', 'true'); feedback.hidden = !state.status;
-      container.append(warning, feedback, footer); root.append(container); updateSummary();
+      container.append(warning, feedback, footer);
+      } else {
+        const summary = element('p', 'ui-alert'); summary.dataset.quickSummary = ''; container.append(summary);
+        if (state.job) {
+          const progress = element('progress', 'vr-progress'); progress.max = 1; progress.value = state.job.progress > 1 ? state.job.progress / 100 : state.job.progress;
+          progress.setAttribute('aria-label', t('jobProgress')); container.append(progress,
+            element('p', 'ui-text-muted', `${state.job.completedSegments}/${state.job.totalSegments} · ${Math.round(progress.value * 100)}%`), element('p', 'ui-text-muted', t('jobContinues')));
+          for (const warning of state.job.warnings) container.append(element('p', 'ui-alert', warning));
+        }
+        const footer = element('div', 'vr-footer');
+        footer.append(action(t('close'), 'close', () => props.close(), false));
+        if (state.job) footer.append(action(t('refreshJob'), 'refresh-job', () => { if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; } void pollJob(); }, state.jobRequest));
+        if (jobActive()) footer.append(action(t('cancelJob'), 'cancel-job', cancelJob, state.jobRequest));
+        else footer.append(action(t(state.speechRequired ? 'downloadSpeech' : 'quickStart'), state.speechRequired ? 'download-speech' : 'quick-start',
+          () => startJob(state.speechRequired), locked() || Boolean(props.busy) || !state.duration || Boolean(state.job), true));
+        container.append(footer);
+      }
+      container.append(action(t(state.advanced ? 'quickBack' : 'advanced'), 'toggle-advanced', () => { state.advanced = !state.advanced; state.status = ''; render(); }, locked() || Boolean(state.job)));
+      root.append(container); root.scrollTop = scrollTop; updateSummary();
+    }
+    function stopPlaybackElement() {
+      if (!playbackElement) return;
+      if (Number.isFinite(playbackElement.currentTime)) state.playbackTime = playbackElement.currentTime;
+      playbackElement.pause?.(); playbackElement.removeAttribute('src'); playbackElement.load?.(); playbackElement = null;
     }
     function refresh() {
       const statusKey = Object.keys(STRINGS['en-US']).find((key) => Object.values(STRINGS).some((dictionary) => dictionary[key] === state.status));
@@ -709,13 +984,23 @@ function createMentionRenderer(container, onCommit) {
       render();
     }
     window.addEventListener('ai-canvas-theme-change', refresh); window.addEventListener('ai-canvas-locale-change', refresh);
-    render(); if (video) void perform(initialize);
+    if (props.parameters?.replicaJob) {
+      try { applyJob(props.parameters.replicaJob); state.advanced = false;
+        if (videoModels.some((model) => model.id === state.job.modelId)) state.quickModel = state.job.modelId;
+      }
+      catch { state.status = t('jobInvalid'); state.error = true; }
+    }
+    render(); if (video && !state.job && !props.parameters?.replicaJob) void perform(initialize);
+    if (state.job) void pollJob();
     return function cleanup() {
       state.disposed = true; state.sequence++;
+      if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; }
       closeMentions(false);
       window.removeEventListener('ai-canvas-theme-change', refresh); window.removeEventListener('ai-canvas-locale-change', refresh);
       for (const dispose of domListeners) dispose(); domListeners = [];
+      stopPlaybackElement();
       for (const url of objectUrls) URL.revokeObjectURL(url); objectUrls.clear(); root.replaceChildren();
+      root.classList.toggle('vr-viewport', false);
     };
   };
 })();

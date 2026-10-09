@@ -7,14 +7,15 @@
     "invocation.cancel",
     "tool.effectBudgets",
     "video.nodeSetGeneration",
-    "prompt.mentions"
+    "prompt.mentions",
+    "video.replicaPipeline"
   ],
   "runtime": "python",
   "id": "com.aicanvas.video-replica",
   "name": "视频复刻",
   "version": "0.1.0",
   "author": "AI Canvas",
-  "description": "拆解视频镜头与运镜，复用应用图卡引用选取器制作 ReShot 控制素材，通过已配置视频模型或 ComfyUI 逐镜生成。",
+  "description": "一键复刻完整视频，可按模型能力自动分段或手动打点，提取音频对白、制作 ReShot 控制素材，通过已配置视频模型或 ComfyUI 生成并合成。",
   "license": "Apache-2.0",
   "category": "media",
   "keywords": [
@@ -37,7 +38,7 @@
   ],
   "ui": {
     "entry": "ui.js",
-    "integrity": "sha256-2d67ac6e5a5e89122873a271608e4b3c4cebdf003100def03f5029a685a79446",
+    "integrity": "sha256-813beb89379185204bbaaf8f91e01f433b6ed271af799cb892879bac843d9d82",
     "exports": {
       "replica": "VideoReplica"
     }
@@ -72,7 +73,7 @@
         },
         "dialog": {
           "title": "视频复刻",
-          "description": "先校正镜头，再生成提示词与控制视频。",
+          "description": "选择模型后一键复刻全片，也可手动打点或进入高级镜头编辑。",
           "submitLabel": "生成复刻素材",
           "fields": [],
           "ui": "replica",

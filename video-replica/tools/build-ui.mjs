@@ -25,7 +25,31 @@ const [source, pickerSource, baseCss, pickerCss, manifestSource] = await Promise
   utf8(resolve(pluginRoot, 'src/ui.js')), utf8(pickerPath), utf8(basePath), utf8(pickerCssPath), utf8(resolve(pluginRoot, 'manifest.json')),
 ]);
 const cssConfig = { ...configModule.default, content: [{ raw: pickerSource, extension: 'tsx' }] };
-const compiledCss = await postcssModule.default([tailwindModule.default(cssConfig)]).process(baseCss, { from: basePath });
+const postcss = postcssModule.default;
+// Share design tokens, not the host window's fixed layout and scrolling policy.
+// Inspect top-level AST nodes only: descendant selectors and application rules stay in the host.
+const parsedBaseCss = postcss.parse(baseCss, { from: basePath });
+const sharedBaseCss = parsedBaseCss.clone({ nodes: [] });
+const themeSelectors = new Set([':root', "[data-theme='light']", '[data-theme="light"]']);
+const includedThemes = new Set();
+for (const node of parsedBaseCss.nodes) {
+  if (node.type === 'atrule' && node.name === 'tailwind' && ['base', 'components', 'utilities'].includes(node.params.trim())) {
+    sharedBaseCss.append(node.clone());
+  } else if (node.type === 'rule' && themeSelectors.has(node.selector.trim())) {
+    const themeRule = node.clone({ nodes: [] });
+    for (const declaration of node.nodes) {
+      if (declaration.type === 'decl' && (declaration.prop.startsWith('--') || declaration.prop === 'color-scheme')) {
+        themeRule.append(declaration.clone());
+      }
+    }
+    if (themeRule.nodes.length) {
+      sharedBaseCss.append(themeRule);
+      includedThemes.add(node.selector.trim() === ':root' ? 'dark' : 'light');
+    }
+  }
+}
+if (!includedThemes.has('dark') || !includedThemes.has('light')) throw new Error('Host base CSS must provide both shared theme token rules');
+const compiledCss = await postcss([tailwindModule.default(cssConfig)]).process(sharedBaseCss, { from: basePath });
 
 // Iconify string icons must be registered locally; its API is unavailable under plugin CSP.
 const iconNames = {

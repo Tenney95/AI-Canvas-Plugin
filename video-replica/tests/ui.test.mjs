@@ -13,10 +13,11 @@ class Element {
   constructor(tag, doc) {
     this.tagName = tag; this.ownerDocument = doc; this.children = []; this.dataset = {};
     this.attributes = {}; this.listeners = new Map(); this.textContent = ''; this.className = '';
+    this.scrollTop = 0;
     this.classList = { toggle: (name, enabled) => { const classes = new Set(this.className.split(' ')); if (enabled) classes.add(name); else classes.delete(name); this.className = [...classes].join(' '); } };
   }
   append(...items) { for (const item of items) { item.parentElement = this; this.children.push(item); } }
-  replaceChildren(...items) { for (const item of this.children) item.parentElement = null; this.children = []; this.append(...items); }
+  replaceChildren(...items) { for (const item of this.children) item.parentElement = null; this.children = []; this.scrollTop = 0; this.append(...items); }
   remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((item) => item !== this); this.parentElement = null; }
   contains(item) { return item === this || this.children.some((child) => child.contains(item)); }
   setAttribute(name, value) { this.attributes[name] = value; }
@@ -27,6 +28,8 @@ class Element {
   focus(options) { this.ownerDocument.activeElement = this; this.focusOptions = options; }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   querySelector(selector) { return find(this, (item) => selector === '[data-summary]' && Object.hasOwn(item.dataset, 'summary')
+    || selector === '[data-quick-summary]' && Object.hasOwn(item.dataset, 'quickSummary')
+    || selector === `[data-field="${item.dataset.field}"]`
     || selector === '[data-budget-warning]' && Object.hasOwn(item.dataset, 'budgetWarning')
     || selector === `[data-action="${item.dataset.action}"]`); }
 }
@@ -64,25 +67,29 @@ function mockMentionRenderer(container, onCommit) {
   doc.renderers.push(renderer); return renderer;
 }
 function runtime() {
-  const events = new Map(); const revoked = [];
+  const events = new Map(); const revoked = []; const blobs = [];
+  const timers = new Map(); let nextTimer = 0;
   const doc = { renderers: [], createElement: (tag) => new Element(tag, doc) };
   const window = {
     __AI_CANVAS_PLUGIN_HOST__: { exports: {} },
     addEventListener(name, fn) { if (!events.has(name)) events.set(name, new Set()); events.get(name).add(fn); },
     removeEventListener(name, fn) { events.get(name)?.delete(fn); },
   };
-  const context = createContext({ window, Blob, Uint8Array, atob, URL: {
-    createObjectURL: () => 'blob:test-preview', revokeObjectURL: (url) => revoked.push(url),
+  const context = createContext({ window, Blob, Uint8Array, atob,
+    setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
+    clearTimeout: (id) => timers.delete(id), URL: {
+    createObjectURL: (blob) => { blobs.push(blob); return 'blob:test-preview'; }, revokeObjectURL: (url) => revoked.push(url),
   } });
   // Test-only injection: production bundle exports only its mount function.
   const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedPickerCss = ''; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
   new Script(executable.replace('const bridge = window.__AI_CANVAS_PLUGIN_HOST__;',
-    'globalThis.helpers = { validateShots, planSamples, parseModelResponse, nodeCount, buildPrompt, generationParameters, mentionRange, mentionItems }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
-  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, renderers: doc.renderers };
+    'globalThis.helpers = { validateShots, planSamples, parseModelResponse, nodeCount, buildPrompt, generationParameters, mentionRange, mentionItems, segmentLimit, planSegments }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
+  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, timers,
+    fireTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback(); } };
 }
 function props(overrides = {}) {
   return {
-    locale: 'zh-CN', theme: 'dark', busy: false, node: { id: 'video-node', data: {} }, parameters: {},
+    locale: 'zh-CN', theme: 'dark', busy: false, node: { id: 'video-node', data: {} }, parameters: { uiMode: 'advanced' },
     models: [{ id: 'vision', name: 'Vision', category: 'text', provider: 'test', inputModalities: ['text', 'image'] },
       { id: 'general/video-model', name: 'Relay video', category: 'video', provider: 'relay' },
       { id: 'comfyui/video-workflow', name: 'Comfy video workflow', category: 'video', provider: 'comfyui' }],
@@ -374,6 +381,65 @@ test('playback reads only bounded host ranges and revokes its object URL', async
   const ui = runtime(); const cleanup = ui.mount(ui.root, props()); await flush(); await click(ui.root, 'play');
   assert.ok(find(ui.root, (item) => item.tagName === 'video')); cleanup(); assert.deepEqual(ui.revoked, ['blob:test-preview']);
 });
+test('playback above the host string limit reads safe consecutive ranges and preserves every byte', async () => {
+  const ui = runtime(); const options = props(); const regularEffect = options.runEffect; const requests = [];
+  const bytes = Buffer.alloc(400123); for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+  options.resources.self[0].size = bytes.length;
+  options.runEffect = async (effect) => {
+    if (effect.type !== 'resource.readRange') return regularEffect(effect);
+    requests.push(effect);
+    const base64 = bytes.subarray(effect.offset, effect.offset + effect.length).toString('base64');
+    assert.ok(base64.length <= 256000, 'actual host string limit');
+    return { ok: true, value: { offset: effect.offset, bytes: effect.length, base64 } };
+  };
+  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'play');
+  assert.deepEqual(requests.map(({ offset, length }) => ({ offset, length })), [
+    { offset: 0, length: 184320 }, { offset: 184320, length: 184320 }, { offset: 368640, length: 31483 },
+  ]);
+  assert.ok(Buffer.from(await ui.blobs[0].arrayBuffer()).equals(bytes));
+  assert.match(texts(ui.root), /播放预览已就绪/); cleanup();
+});
+test('maximum playback size remains within the host range count and byte budgets', async () => {
+  const ui = runtime(); const options = props(); const regularEffect = options.runEffect;
+  options.resources.self[0].size = 16 * 1024 * 1024; let reads = 0; let total = 0;
+  options.runEffect = async (effect) => {
+    if (effect.type !== 'resource.readRange') return regularEffect(effect);
+    reads++; total += effect.length;
+    const base64 = Buffer.alloc(effect.length).toString('base64'); assert.ok(base64.length <= 256000);
+    return { ok: true, value: { offset: effect.offset, bytes: effect.length, base64 } };
+  };
+  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'play');
+  assert.equal(reads, 92); assert.ok(reads <= 96); assert.equal(total, 16 * 1024 * 1024);
+  assert.equal(ui.blobs[0].size, total); cleanup();
+});
+test('range failure is reported as a read failure without creating a partial playback blob', async () => {
+  const ui = runtime(); const options = props(); const regularEffect = options.runEffect;
+  options.resources.self[0].size = 400123;
+  options.runEffect = async (effect) => {
+    if (effect.type !== 'resource.readRange') return regularEffect(effect);
+    if (effect.offset) return { ok: false, error: 'lease revoked' };
+    return { ok: true, value: { offset: 0, bytes: effect.length, base64: Buffer.alloc(effect.length).toString('base64') } };
+  };
+  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'play');
+  assert.match(texts(ui.root), /播放预览读取失败/); assert.doesNotMatch(texts(ui.root), /lease revoked/);
+  assert.equal(ui.blobs.length, 0); assert.ok(find(ui.root, (item) => item.tagName === 'img')); cleanup();
+});
+test('late playback ranges cannot create blobs or update a closed view', async () => {
+  const ui = runtime(); const options = props(); const regularEffect = options.runEffect; let resolveRead;
+  options.runEffect = (effect) => effect.type === 'resource.readRange'
+    ? new Promise((resolve) => { resolveRead = resolve; }) : regularEffect(effect);
+  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'play');
+  assert.match(texts(ui.root), /正在加载播放预览/); cleanup();
+  resolveRead({ ok: true, value: { offset: 0, bytes: 1, base64: 'AA==' } }); await flush();
+  assert.equal(ui.blobs.length, 0); assert.equal(ui.root.children.length, 0);
+});
+test('the view owns its scroll viewport and preserves scroll when actions or theme changes rebuild content', async () => {
+  const ui = runtime(); const cleanup = ui.mount(ui.root, props()); await flush();
+  assert.match(ui.root.className, /vr-viewport/); ui.root.scrollTop = 560;
+  await click(ui.root, 'detect'); assert.equal(ui.root.scrollTop, 560);
+  for (const callback of ui.events.get('ai-canvas-theme-change')) callback();
+  assert.equal(ui.root.scrollTop, 560); cleanup(); assert.doesNotMatch(ui.root.className, /vr-viewport/);
+});
 test('browser codec failure revokes playback and keeps thumbnail preview', async () => {
   const ui = runtime(); const cleanup = ui.mount(ui.root, props()); await flush(); await click(ui.root, 'play');
   find(ui.root, (item) => item.tagName === 'video').dispatch('error');
@@ -411,6 +477,113 @@ test('preview metadata rejects raw URLs, oversized pixels, invalid crops and uns
   assert.equal(safe.thumbnailDataUrl, sample); assert.equal(safe.thumbnailUrl, undefined); assert.equal(safe.apiKey, undefined);
 });
 
+const jobSnapshot = (extra = {}) => ({ jobId: 'job-one', status: 'preparing', stage: '提取控制素材', totalSegments: 2, completedSegments: 0, progress: .1, updatedAt: 1, ...extra });
+function quickProps(effect, extra = {}) {
+  const base = props();
+  return props({ parameters: {}, models: [base.models[0], { ...base.models[1], videoCapability: { minDuration: 5, maxDuration: 30, maxVideoReferences: 1 } }, base.models[2]],
+    async runEffect(request) {
+      if (request.type === 'video.extractFrames' && request.mode === 'preview') return { ok: true, value: { video: { duration: 60, width: 1280, height: 720 }, frames: [] } };
+      return effect ? effect(request) : base.runEffect(request);
+    }, ...extra });
+}
+test('full-film segment planning respects model maximums and optional user cuts without gaps', () => {
+  const { helpers } = runtime();
+  assert.equal(helpers.planSegments(60, [], 30).length, 2); assert.equal(helpers.planSegments(60, [], 15).length, 4);
+  const segments = clone(helpers.planSegments(60, [55, 20], 30));
+  assert.deepEqual(segments, [{ inPoint: 0, outPoint: 20 }, { inPoint: 20, outPoint: 50 }, { inPoint: 50, outPoint: 55 }, { inPoint: 55, outPoint: 60 }]);
+  for (const cuts of [[0], [60], [20, 20], [NaN], ['15']]) assert.throws(() => helpers.planSegments(60, cuts, 30), /invalidCuts/);
+  assert.throws(() => helpers.planSegments(301, [], 30), /invalidCuts/);
+  assert.equal(helpers.segmentLimit({ videoCapability: { maxDuration: 30, inputConstraints: { referenceVideo: { durationSeconds: { max: 15 } } } } }), 30);
+  assert.equal(helpers.segmentLimit({ videoCapability: { durations: [5, 10] } }), 10);
+});
+test('default one-click mode starts the full film without shot detection or manual extraction', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(clone(request)); return { ok: true, value: jobSnapshot() }; })); await flush();
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'detect'), undefined);
+  assert.match(texts(ui.root), /预计生成 2 段/);
+  edit(ui.root, 'character', reference().token); edit(ui.root, 'scene', '新场景'); await click(ui.root, 'quick-start');
+  assert.equal(requests.length, 1); assert.equal(requests[0].type, 'video.replicaJob.start');
+  assert.equal(requests[0].modelId, 'general/video-model'); assert.equal(requests[0].maxSegmentSeconds, 30);
+  assert.equal(requests[0].audioMode, 'original'); assert.equal(requests[0].transcribe, true); assert.equal(requests[0].character, reference().token);
+  assert.equal(requests[0].operation, undefined); assert.deepEqual(requests[0].cuts, []); assert.deepEqual(requests[0].controls, ['depth']);
+  assert.equal(ui.timers.size, 1); assert.equal([...ui.timers.values()][0].delay, 2000);
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'character').disabled, true);
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'close').disabled, false);
+  cleanup(); assert.equal(ui.timers.size, 0); assert.equal(requests.some((request) => request.type === 'video.replicaJob.cancel'), false);
+});
+test('manual cut points can be added, removed and reset while overlong intervals remain split', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(clone(request)); return { ok: true, value: jobSnapshot({ totalSegments: 3 }) }; })); await flush();
+  edit(ui.root, 'cut-time', 20); await click(ui.root, 'add-cut'); assert.match(texts(ui.root), /预计生成 3 段/);
+  await click(ui.root, 'remove-cut-20'); assert.match(texts(ui.root), /预计生成 2 段/);
+  edit(ui.root, 'cut-time', 20); await click(ui.root, 'add-cut');
+  edit(ui.root, 'cut-time', 20); await click(ui.root, 'add-cut'); assert.match(texts(ui.root), /不能重复/);
+  await click(ui.root, 'quick-start'); assert.deepEqual(requests[0].cuts, [20]); cleanup();
+});
+test('first speech model download requires an explicit second click and sends only that authorization', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(clone(request)); return { ok: true, value: requests.length === 1 ? { speechModelsRequired: true } : jobSnapshot() }; })); await flush();
+  await click(ui.root, 'quick-start'); assert.equal(requests.length, 1); assert.equal(requests[0].downloadSpeech, undefined); assert.equal(ui.timers.size, 0);
+  assert.match(texts(ui.root), /首次使用需下载/); await click(ui.root, 'download-speech'); assert.equal(requests[1].downloadSpeech, true); cleanup();
+});
+test('job status polling backs off, stops on uncertain submission and never submits automatically again', async () => {
+  const ui = runtime(); const requests = []; let statusCalls = 0;
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(clone(request));
+    return { ok: true, value: request.type.endsWith('.start') ? jobSnapshot() : jobSnapshot({ updatedAt: ++statusCalls + 1, status: statusCalls === 4 ? 'unknown' : 'generating' }) };
+  })); await flush(); await click(ui.root, 'quick-start');
+  for (let index = 0; index < 3; index++) { assert.equal([...ui.timers.values()][0].delay, 2000); ui.fireTimer(); await flush(); }
+  assert.equal([...ui.timers.values()][0].delay, 5000); ui.fireTimer(); await flush(); assert.equal(ui.timers.size, 0);
+  assert.match(texts(ui.root), /避免重复付费/); assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start').disabled, true);
+  assert.equal(requests.filter((request) => request.type.endsWith('.start')).length, 1); cleanup();
+});
+test('cancel is a host job action and late polling cannot reopen a closed panel', async () => {
+  const ui = runtime(); let resolvePoll; const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(request.type);
+    if (request.type.endsWith('.status')) return new Promise((resolve) => { resolvePoll = resolve; });
+    return { ok: true, value: jobSnapshot({ status: request.type.endsWith('.cancel') ? 'cancelled' : 'preparing', updatedAt: request.type.endsWith('.cancel') ? 5 : 1 }) };
+  })); await flush(); await click(ui.root, 'quick-start'); ui.fireTimer(); await flush(); await click(ui.root, 'cancel-job');
+  assert.match(texts(ui.root), /任务已停止/); cleanup(); resolvePoll({ ok: true, value: jobSnapshot({ status: 'generating', updatedAt: 2 }) }); await flush();
+  assert.equal(ui.root.children.length, 0); assert.equal(ui.timers.size, 0); assert.deepEqual(requests, ['video.replicaJob.start', 'video.replicaJob.status', 'video.replicaJob.cancel']);
+});
+test('reference-incompatible models are skipped for default depth and unknown workflow duration is editable', async () => {
+  const ui = runtime(); const base = quickProps(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(request); return { ok: true, value: jobSnapshot() }; },
+    { models: [base.models[0], { ...base.models[1], id: 'unsupported', videoCapability: { maxDuration: 30, maxVideoReferences: 0 } }, base.models[2]] })); await flush();
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'quick-model').value, 'comfyui/video-workflow'); assert.match(texts(ui.root), /未声明时长/);
+  edit(ui.root, 'segment-seconds', 15); select(ui.root, 'audio-mode', 'mute'); await click(ui.root, 'quick-start');
+  assert.equal(requests[0].modelId, 'comfyui/video-workflow'); assert.equal(requests[0].audioMode, 'mute'); assert.equal(requests[0].maxSegmentSeconds, 15); cleanup();
+});
+test('quick mode offers submission-guarded channels while advanced mode keeps other configured models', async () => {
+  const ui = runtime(); const base = quickProps();
+  const cleanup = ui.mount(ui.root, quickProps(undefined, { models: [
+    { ...base.models[1], id: 'apimart/other-video', name: 'Other video', provider: 'apimart' }, ...base.models,
+  ] })); await flush();
+  const quick = find(ui.root, (node) => node.dataset.field === 'quick-model');
+  assert.equal(quick.value, 'general/video-model');
+  assert.equal(quick.children.some((node) => node.value === 'apimart/other-video'), false);
+  await click(ui.root, 'toggle-advanced'); select(ui.root, 'generation-backend', 'model');
+  const advanced = find(ui.root, (node) => node.dataset.field === 'generation-model');
+  assert.equal(advanced.children.some((node) => node.value === 'apimart/other-video'), true);
+  cleanup();
+});
+test('reopening a host task restores observation and does not resubmit uncertain generation', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(request.type); return { ok: true, value: jobSnapshot({ status: 'unknown', updatedAt: 5 }) }; },
+    { parameters: { replicaJob: jobSnapshot({ status: 'unknown', updatedAt: 4 }) } })); await flush();
+  assert.deepEqual(requests, ['video.replicaJob.status']); assert.equal(ui.timers.size, 0);
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start'), undefined);
+  await click(ui.root, 'refresh-job'); assert.deepEqual(requests, ['video.replicaJob.status', 'video.replicaJob.status']); cleanup();
+});
+test('observation without source grants shows progress and only queries or cancels the bound task', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, props({ parameters: { replicaJob: jobSnapshot() }, resources: { self: [] },
+    async runEffect(request) { requests.push(request.type); return { ok: true, value: jobSnapshot({ status: request.type.endsWith('.cancel') ? 'cancelled' : 'preparing', updatedAt: 5 }) }; }
+  })); await flush();
+  assert.match(texts(ui.root), /复刻进度|提取控制素材/); assert.doesNotMatch(texts(ui.root), /当前节点没有可授权/);
+  assert.deepEqual(requests, ['video.replicaJob.status']); assert.equal(find(ui.root, (node) => node.dataset.action === 'play'), undefined);
+  await click(ui.root, 'cancel-job'); assert.match(texts(ui.root), /任务已停止/);
+  assert.deepEqual(requests, ['video.replicaJob.status', 'video.replicaJob.cancel']); cleanup();
+});
 test('editable source imports the actual shared picker and generated artifact stays within host limits', async () => {
   assert.match(source, /import MentionPicker from '@host\/MentionPicker'/);
   assert.match(source, /import sharedPickerCss from '@host\/mention-picker\.css'/);

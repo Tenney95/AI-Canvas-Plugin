@@ -20,6 +20,7 @@ import uuid
 MAX_SHOTS = 6
 MAX_NODES = 25
 MAX_SHOT_SECONDS = 15.0
+MAX_SEGMENT_SECONDS = 30.0
 WORK_SECONDS = 110.0
 CONTROL_LABELS = {"depth": "深度", "pose": "骨架", "canny": "线稿"}
 SAFE_KEY = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
@@ -103,8 +104,10 @@ def _generation(input_value):
 
 
 def _normalise(parameters):
-    if not isinstance(parameters, dict) or parameters.get("operation") != "replicate":
+    if not isinstance(parameters, dict) or parameters.get("operation") not in ("replicate", "replicate-segment"):
         raise ReplicaError("请从视频复刻面板提交已确认的镜头。")
+    segmented = parameters["operation"] == "replicate-segment"
+    duration_limit = MAX_SEGMENT_SECONDS if segmented else MAX_SHOT_SECONDS
     raw_shots = parameters.get("shots")
     if not isinstance(raw_shots, list) or not 1 <= len(raw_shots) <= MAX_SHOTS:
         raise ReplicaError("每次处理 1–6 个镜头，请分批提交。")
@@ -122,8 +125,15 @@ def _normalise(parameters):
             raise ReplicaError("镜头标识无效或重复，请重新拉片。")
         seen.add(key)
         start, end = _number(raw.get("inPoint")), _number(raw.get("outPoint"))
-        if end <= start or end - start > MAX_SHOT_SECONDS + 1e-6:
-            raise ReplicaError("每个镜头须大于 0 秒且不超过 15 秒，请调整切点。")
+        if end <= start or end - start > duration_limit + 1e-6:
+            raise ReplicaError("每个%s须大于 0 秒且不超过 %d 秒，请调整切点。" % (
+                "生成段" if segmented else "镜头", duration_limit))
+        reference_duration = raw.get("referenceDuration", end - start)
+        reference_duration = _number(reference_duration)
+        if reference_duration < end - start - 1e-6 or reference_duration > duration_limit + 1e-6:
+            raise ReplicaError("参考控制视频时长不能短于原片区间或超过本次处理上限。")
+        if not segmented and abs(reference_duration - (end - start)) > 1e-6:
+            raise ReplicaError("手动镜头模式不支持延长控制视频。")
         if start < previous_end - 1e-6:
             raise ReplicaError("镜头须按时间顺序排列，且不能重叠。")
         previous_end = end
@@ -132,6 +142,7 @@ def _normalise(parameters):
                 not isinstance(frame_resource, str) or not 1 <= len(frame_resource) <= 256):
             raise ReplicaError("关键帧资源句柄无效，请重新抽帧。")
         shots.append({"key": key, "inPoint": start, "outPoint": end,
+                      "referenceDuration": reference_duration,
                       "description": _text(raw.get("description")),
                       "prompt": _text(raw.get("prompt")),
                       "frameResourceId": frame_resource})
@@ -228,9 +239,16 @@ def main():
             factor = min(1.0, 1280.0 / max(width, height))
             scale = "scale=%d:%d" % (max(2, int(width * factor) // 2 * 2),
                                       max(2, int(height * factor) // 2 * 2))
+            original_duration = shot["outPoint"] - shot["inPoint"]
+            reference_duration = shot.get("referenceDuration", original_duration)
+            filters = "fps=24," + scale
+            if reference_duration > original_duration + 1e-6:
+                # 先截到原片区间，再复制尾帧延长到模型合法时长；不读入下一个生成段。
+                filters += ",trim=duration=%s,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=%s" % (
+                    original_duration, reference_duration - original_duration)
             command([ffmpeg, "-y", "-loglevel", "error", "-ss", str(shot["inPoint"]),
-                     "-i", str(source), "-t", str(shot["outPoint"]-shot["inPoint"]),
-                     "-map", "0:v:0", "-an", "-vf", "fps=24," + scale,
+                     "-i", str(source), "-t", str(reference_duration),
+                     "-map", "0:v:0", "-an", "-vf", filters,
                      "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
                      "-pix_fmt", "yuv420p", str(segment)])
             for control in job["controls"]:
@@ -291,7 +309,7 @@ def main():
                     or fps <= 0 or frames <= 0 or width < 2 or height < 2):
                     raise RuntimeError("invalid_output")
                 shot = next(s for s in job["shots"] if s["key"] == artifact["shotKey"])
-                wanted = shot["outPoint"] - shot["inPoint"]
+                wanted = shot.get("referenceDuration", shot["outPoint"] - shot["inPoint"])
                 if abs(frames / fps - wanted) > max(0.15, 2.0 / fps):
                     raise RuntimeError("duration_mismatch")
             finally:
@@ -384,6 +402,8 @@ def replicate(input_value):
         raise ReplicaError("插件输入无效。")
     options = _normalise(input_value.get("parameters"))
     generation = _generation(input_value)
+    if input_value["parameters"]["operation"] == "replicate-segment" and generation is not None:
+        raise ReplicaError("自动生成段只返回控制素材，视频模型由宿主任务调用。")
     shots, controls = options["shots"], options["controls"]
     node_count = 2 + sum(bool(s["frameResourceId"]) for s in shots) + len(shots) * len(controls)
     if generation is not None and node_count + len(shots) > MAX_NODES:
