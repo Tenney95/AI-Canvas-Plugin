@@ -15,6 +15,7 @@
   "name": "视频复刻",
   "version": "0.1.0",
   "author": "AI Canvas",
+  "repository": "https://github.com/Tenney95/AI-Canvas-Plugin",
   "description": "一键复刻完整视频，可按模型能力自动分段或手动打点，提取音频对白、制作 ReShot 控制素材，通过已配置视频模型或 ComfyUI 生成并合成。",
   "license": "Apache-2.0",
   "category": "media",
