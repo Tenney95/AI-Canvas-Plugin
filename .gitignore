@@ -1,0 +1,28 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Dependencies, local credentials, and generated job files
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+outputs/
+artifacts/
+
+# Model weights are prepared separately
+models/
+weights/
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
+# OS files
+.DS_Store
+Thumbs.db
