@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { addIcon } from '@iconify/react';
 import MentionPicker from '@host/MentionPicker';
 import Select from '@host/Select';
+import Timeline from '@host/Timeline';
 import sharedUiKitCss from '@host/ui-kit.css';
 import sharedPickerCss from '@host/mention-picker.css';
 import sharedBaseCss from '@host/base.css';
@@ -38,6 +39,13 @@ function createSelectRenderer(container, selectProps) {
   };
   reactRoot.render(createElement(Select, { ...selectProps, onChange }));
   return { dispose() { if (!disposed) { disposed = true; reactRoot.unmount(); } } };
+}
+function createTimelineRenderer(container) {
+  const reactRoot = createRoot(container); let disposed = false;
+  return {
+    update(options) { if (!disposed) reactRoot.render(createElement(Timeline, options)); },
+    dispose() { if (!disposed) { disposed = true; reactRoot.unmount(); } },
+  };
 }
 /* shared-renderer:end */
 
@@ -143,7 +151,7 @@ function createSelectRenderer(container, selectProps) {
     quickTitle: '一键复刻完整视频', quickHint: '自动准备控制视频、识别对白、逐段生成并合成。也可以打点指定切分位置。',
     quickReady: '参考视频已就绪。选择模型后可直接复刻完整视频。', quickStart: '一键复刻',
     quickControlHint: '深度/骨架需要预备本机 ReShot 与权重。宿主检查所选模型的参考视频能力，再生成素材与视频。',
-    advanced: '高级：手动镜头与物料', quickBack: '返回一键复刻', timeline: '生成段时间轴', cutTime: '打点位置（秒）',
+    advanced: '高级：手动镜头与物料', quickBack: '返回一键复刻', zoomIn: '放大', zoomOut: '缩小', fitTimeline: '适应', cutMarker: '手动切点', timeline: '生成段时间轴', cutTime: '打点位置（秒）',
     addCut: '添加切点', addPlaybackCut: '在当前播放位置打点', removeCut: '删除切点', clearCuts: '恢复自动分段',
     cutsHint: '首尾自动保留；手动区间超过模型上限时会继续拆分，完整覆盖原片。',
     segmentSeconds: '每段最长（秒）', durationUnknown: '此模型/工作流未声明时长能力，请确认下面的段长符合其设置。',
@@ -165,7 +173,7 @@ function createSelectRenderer(container, selectProps) {
     quickTitle: 'Replicate the complete video', quickHint: 'Prepare controls, transcribe dialogue, generate segments and compose automatically. Optional cuts control segment boundaries.',
     quickReady: 'Reference ready. Choose a model and replicate the complete video.', quickStart: 'Replicate video',
     quickControlHint: 'Depth/pose require prepared local ReShot weights. The host checks model reference-video capabilities before preparing materials and generating videos.',
-    advanced: 'Advanced: shots and materials', quickBack: 'Back to one-click replication', timeline: 'Generation timeline', cutTime: 'Cut position (seconds)',
+    advanced: 'Advanced: shots and materials', quickBack: 'Back to one-click replication', zoomIn: 'Zoom in', zoomOut: 'Zoom out', fitTimeline: 'Fit', cutMarker: 'Manual cut', timeline: 'Generation timeline', cutTime: 'Cut position (seconds)',
     addCut: 'Add cut', addPlaybackCut: 'Cut at playback position', removeCut: 'Remove cut', clearCuts: 'Reset automatic segments',
     cutsHint: 'Start and end are kept automatically. Intervals above the model limit are split further; the entire source is covered.',
     segmentSeconds: 'Maximum segment (seconds)', durationUnknown: 'This model/workflow has no declared duration capability. Confirm the segment length matches its settings.',
@@ -210,7 +218,7 @@ function createSelectRenderer(container, selectProps) {
     .vr .ui-field__label { color: var(--theme-text-secondary); }
     .vr .ui-alert { padding: var(--ui-pad-sm); border: 1px solid var(--theme-border); border-radius: var(--ui-radius); background: var(--theme-surface); overflow-wrap: anywhere; }
     .vr .ui-alert.is-error { border-color: var(--theme-text-secondary); font-weight: 600; }
-    .vr.vr-stack, .vr .vr-stack { display: grid; gap: 12px; }
+    .vr.vr-stack, .vr .vr-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
     .vr .vr-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .vr .vr-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(240px, .8fr); gap: 12px; }
     .vr .vr-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
@@ -224,9 +232,9 @@ function createSelectRenderer(container, selectProps) {
     .vr .vr-shot__grid { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 12px; }
     .vr .vr-footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
     .vr .vr-summary { margin-right: auto; color: var(--theme-text-secondary); }
-    .vr .vr-timeline { width: 100%; accent-color: var(--brand); }
-    .vr .vr-segments { display: flex; flex-wrap: wrap; gap: 4px; }
-    .vr .vr-segment { padding: 4px 8px; border-radius: var(--ui-radius-md); background: var(--theme-surface); border: 1px solid var(--theme-border); }
+
+
+
     .vr .vr-progress { width: 100%; accent-color: var(--brand); }
     .vr .ui-field:has(textarea) { position: relative; }
     .vr .vr-mentions { position: absolute; left: 0; width: min(336px, 100%); z-index: 40;
@@ -383,7 +391,7 @@ function createSelectRenderer(container, selectProps) {
     root.classList.toggle('vr-viewport', true);
     const state = { disposed: false, sequence: 0, busy: false, shots: [], thumbnails: [], duration: 0,
       width: 0, height: 0, start: 0, end: 15, controls: new Set(['depth']), character: '', scene: '', style: '',
-      model: '', calls: 0, status: '', error: false, playback: '', playbackAttempted: false, nextKey: 0,
+      model: '', calls: 0, status: '', error: false, mediaLoading: '', playback: '', playbackAttempted: false, nextKey: 0,
       generationBackend: 'materials', videoModel: '', aspectRatio: '', resolution: '', generateAudio: false,
       advanced: props.parameters?.uiMode === 'advanced', quickModel: '', cuts: [], cutTime: 0, maxSegmentSeconds: 15,
       audioMode: 'original', transcribe: true, job: null, jobRequest: false, speechRequired: false, playbackTime: 0 };
@@ -399,6 +407,9 @@ function createSelectRenderer(container, selectProps) {
     let jobTimer = null; let pollAttempts = 0; let pollFailures = 0; let pollInFlight = false;
     let domListeners = [];
     let selectRenderers = [];
+    let timelineRenderer = null; let timelineUpdate = null;
+    let timelineView = { pixelsPerSecond: null, scrollLeft: 0 };
+    let cutIds = new Map(); let nextCutId = 0;
     let activeMention = null; let mentionCounter = 0; let mentionSource = 'nodes'; let mentionInFlight = false; let queuedMention = null;
     const t = (key) => (STRINGS[props.locale] || STRINGS['en-US'])[key] || key;
     const selected = () => state.shots.filter((shot) => shot.selected);
@@ -592,9 +603,10 @@ function createSelectRenderer(container, selectProps) {
     function image(frame) {
       if (!frame || typeof frame.previewDataUrl !== 'string' || frame.previewDataUrl.length > 240000
         || !/^data:image\/(jpeg|png|webp);base64,[a-zA-Z0-9+/=]+$/.test(frame.previewDataUrl)) return element('span', 'ui-text-muted', t('frame'));
-      const img = element('img', 'vr-media'); img.src = frame.previewDataUrl; img.alt = `${t('frame')} ${(frame.actualTime || 0).toFixed(3)}s`; return img;
+      const img = element('img', 'vr-media'); img.dataset.timelinePreview = ''; img.src = frame.previewDataUrl; img.alt = `${t('frame')} ${(frame.actualTime || 0).toFixed(3)}s`; return img;
     }
     function updateSummary() {
+      timelineUpdate?.();
       const quickSummary = root.querySelector('[data-quick-summary]');
       if (quickSummary) {
         if (state.job) quickSummary.textContent = `${t('jobProgress')}: ${state.job.completedSegments}/${state.job.totalSegments} ${t('segments')}`;
@@ -620,12 +632,12 @@ function createSelectRenderer(container, selectProps) {
         const key = error instanceof Error ? error.message : String(error);
         state.status = STRINGS['en-US'][key] ? t(key) : `${t('error')}: ${key.slice(0, 400)}`; state.error = true;
       } finally { if (!state.disposed && sequence === state.sequence) {
-        state.busy = false; render();
+        state.busy = false; state.mediaLoading = ''; render();
         if (identifier) root.querySelector(`[data-action="${identifier}"]`)?.focus({ preventScroll: true });
       } }
     }
     async function initialize(sequence) {
-      state.status = t('loading');
+      state.mediaLoading = 'loading'; state.status = t('loading'); render();
       const value = await effect({ type: 'video.extractFrames', resourceId: video.resourceId, mode: 'preview', count: 12 }, sequence);
       if (!value?.video || !Number.isFinite(value.video.duration) || value.video.duration <= 0) throw new Error('previewError');
       state.duration = value.video.duration; state.width = value.video.width; state.height = value.video.height;
@@ -701,7 +713,7 @@ function createSelectRenderer(container, selectProps) {
     async function playback(sequence) {
       state.playbackAttempted = true;
       if (!Number.isSafeInteger(video.size) || video.size <= 0 || video.size > LIMITS.previewBytes) throw new Error('playLimit');
-      state.status = t('playLoading'); render();
+      state.mediaLoading = 'playLoading'; state.status = t('playLoading'); render();
       const chunks = [];
       try {
         // Base64 must fit the host's 256000-character string limit as well as its range budget.
@@ -809,37 +821,58 @@ function createSelectRenderer(container, selectProps) {
       const node = element('button', `ui-btn${primary ? ' ui-btn--primary' : ''}`, label); node.type = 'button'; node.dataset.action = identifier;
       node.disabled = disabled; listen(node, 'click', () => { if (!node.disabled) void handler(); }); return node;
     }
-    function addCut(value) {
-      const rounded = Math.round(value * 1000) / 1000;
-      try { planSegments(state.duration, [...state.cuts, rounded], segmentLimit(quickVideoModels.find((model) => model.id === state.quickModel), state.maxSegmentSeconds));
-        state.cuts = [...state.cuts, rounded].sort((a, b) => a - b); state.error = false;
-      } catch { state.status = t('invalidCuts'); state.error = true; }
-      render();
+    function seekTimeline(value) {
+      if (state.disposed || locked()) return;
+      state.cutTime = Math.max(0, Math.min(state.duration, Number(value) || 0));
+      state.playbackTime = state.cutTime;
+      if (playbackElement) playbackElement.currentTime = state.cutTime;
+      else {
+        const frame = state.thumbnails.reduce((nearest, candidate) => !nearest || Math.abs(candidate.actualTime - state.cutTime) < Math.abs(nearest.actualTime - state.cutTime) ? candidate : nearest, null);
+        const previewImage = root.querySelector('[data-timeline-preview]');
+        if (frame && previewImage) { previewImage.src = frame.previewDataUrl; previewImage.alt = `${t('frame')} ${frame.actualTime.toFixed(3)}s`; }
+      }
+      timelineUpdate?.();
     }
     function renderTimeline() {
-      const section = element('div', 'vr-stack'); section.append(element('h3', 'ui-card__title', t('timeline')));
-      const slider = element('input', 'vr-timeline'); slider.type = 'range'; slider.min = '0'; slider.max = String(state.duration); slider.step = '.001'; slider.value = String(state.cutTime);
-      slider.disabled = locked(); slider.dataset.field = 'cut-timeline'; slider.setAttribute('aria-label', t('cutTime'));
-      listen(slider, 'input', () => { state.cutTime = Number(slider.value); if (playbackElement) playbackElement.currentTime = state.cutTime;
-        const input = root.querySelector('[data-field="cut-time"]'); if (input) input.value = String(state.cutTime); });
-      section.append(slider, field(t('cutTime'), state.cutTime, (value) => { state.cutTime = value; slider.value = String(value); }, 'number', '', 'cut-time'));
-      const actions = element('div', 'vr-row'); actions.append(action(t('addCut'), 'add-cut', () => addCut(state.cutTime), locked()),
-        action(t('addPlaybackCut'), 'add-playback-cut', () => { if (playbackElement) addCut(playbackElement.currentTime); else { state.status = t('cutPlaybackMissing'); state.error = true; render(); } }, locked()),
-        action(t('clearCuts'), 'clear-cuts', () => { state.cuts = []; render(); }, locked() || !state.cuts.length)); section.append(actions);
-      const cuts = element('div', 'vr-row');
-      for (const cut of state.cuts) cuts.append(action(`${cut.toFixed(3)}s ×`, `remove-cut-${cut}`, () => { state.cuts = state.cuts.filter((value) => value !== cut); render(); }, locked()));
-      section.append(cuts, element('p', 'ui-text-muted', t('cutsHint')));
-      const spans = element('div', 'vr-segments'); spans.dataset.segments = '';
-      try { for (const [index, segment] of planSegments(state.duration, state.cuts, segmentLimit(quickVideoModels.find((model) => model.id === state.quickModel), state.maxSegmentSeconds)).entries())
-        spans.append(element('span', 'vr-segment', `${index + 1}: ${segment.inPoint.toFixed(3)}–${segment.outPoint.toFixed(3)}s`)); }
-      catch { spans.append(element('span', 'ui-text-muted', t('invalidCuts'))); }
-      section.append(spans); return section;
+      const section = element('div', 'vr-stack min-w-0');
+      const holder = element('div', 'min-w-0'); holder.dataset.timeline = '';
+      const feedback = element('p', 'ui-text-muted'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
+      section.append(holder, feedback, element('p', 'ui-text-muted', t('cutsHint')));
+      timelineRenderer = createTimelineRenderer(holder);
+      const editCuts = (cuts, moving) => {
+        if (state.disposed || locked()) return false;
+        try {
+          const rounded = cuts.map((time) => Math.round(time * 1000) / 1000);
+          planSegments(state.duration, rounded, segmentLimit(quickVideoModels.find((model) => model.id === state.quickModel), state.maxSegmentSeconds));
+          cutIds = new Map(rounded.map((time) => [time, moving && time === Math.round(moving.time * 1000) / 1000 ? moving.id : cutIds.get(time) || `cut-${++nextCutId}`]));
+          state.cuts = rounded.sort((a, b) => a - b); feedback.textContent = ''; state.error = false;
+        } catch { feedback.textContent = t('invalidCuts'); return false; }
+        timelineUpdate(); updateSummary(); return true;
+      };
+      timelineUpdate = () => {
+        let segments = [];
+        try { segments = planSegments(state.duration, state.cuts, segmentLimit(quickVideoModels.find((model) => model.id === state.quickModel), state.maxSegmentSeconds)).map((segment, index) => ({
+          id: String(index), start: segment.inPoint, end: segment.outPoint, label: `${index + 1}: ${segment.inPoint.toFixed(3)}–${segment.outPoint.toFixed(3)}s`,
+        })); } catch { feedback.textContent = t('invalidCuts'); }
+        timelineRenderer?.update({ duration: state.duration, playhead: state.cutTime,
+          thumbnails: state.thumbnails.map((frame) => frame.previewDataUrl), timestamps: state.thumbnails.map((frame) => frame.actualTime),
+          markers: state.cuts.map((time) => ({ id: cutIds.get(time), time })), segments, disabled: locked() || Boolean(props.busy),
+          viewState: timelineView, onViewChange: (view) => { timelineView = view; }, onSeek: seekTimeline,
+          labels: { title: t('timeline'), playhead: t('cutTime'), track: video.displayName, segments: t('segments'), addMarker: t('addCut'),
+            removeMarker: t('removeCut'), resetMarkers: t('clearCuts'), zoomIn: t('zoomIn'), zoomOut: t('zoomOut'), fit: t('fitTimeline'), position: t('cutTime'), marker: t('cutMarker') },
+          onAddMarker: (time) => editCuts([...state.cuts, time]),
+          onMoveMarker: (id, time) => { if (state.cuts.some((cut) => cutIds.get(cut) === id)) editCuts(state.cuts.map((cut) => cutIds.get(cut) === id ? time : cut), { id, time }); },
+          onRemoveMarker: (id) => editCuts(state.cuts.filter((cut) => cutIds.get(cut) !== id)), onResetMarkers: () => editCuts([]),
+        });
+      };
+      timelineUpdate(); return section;
     }
     function render() {
       if (state.disposed) return;
       const scrollTop = root.scrollTop || 0;
       closeMentions(false);
       for (const renderer of selectRenderers) renderer.dispose(); selectRenderers = [];
+      timelineRenderer?.dispose(); timelineRenderer = null; timelineUpdate = null;
       for (const dispose of domListeners) dispose(); domListeners = [];
       stopPlaybackElement();
       if (root.ownerDocument.documentElement) root.ownerDocument.documentElement.dataset.theme = props.theme;
@@ -865,22 +898,36 @@ function createSelectRenderer(container, selectProps) {
         status.setAttribute('role', state.error ? 'alert' : 'status'); status.setAttribute('aria-live', state.error ? 'assertive' : 'polite'); container.append(status); }
       const grid = element('div', 'vr-grid'); const source = element('section', 'ui-card');
       const sourceHeader = element('div', 'ui-card__header'); sourceHeader.append(element('h2', 'ui-card__title', t('source')),
-        element('p', 'ui-card__desc', `${video.displayName} · ${state.duration.toFixed(3)}s · ${state.width}×${state.height}`)); source.append(sourceHeader);
+        element('p', 'ui-card__desc', state.duration > 0 ? `${video.displayName} · ${state.duration.toFixed(3)}s · ${state.width}×${state.height}` : video.displayName)); source.append(sourceHeader);
       const sourceBody = element('div', 'ui-card__body vr-stack');
+      const preview = element('div', 'relative flex min-h-[160px] items-center justify-center overflow-hidden rounded-lg bg-canvas-bg');
+      const loadingPreview = (key) => {
+        const loading = element('div', 'absolute inset-0 flex items-center justify-center gap-2 bg-canvas-bg text-canvas-text-secondary');
+        loading.dataset.mediaLoading = ''; loading.setAttribute('role', 'status'); loading.setAttribute('aria-live', 'polite');
+        const spinner = element('span', 'ui-spinner'); spinner.setAttribute('aria-hidden', 'true');
+        loading.append(spinner, element('span', '', t(key))); preview.setAttribute('aria-busy', 'true'); return loading;
+      };
       if (state.playback) {
-        const player = element('video', 'vr-media'); player.controls = true; player.preload = 'metadata'; player.src = state.playback;
+        const player = element('video', 'vr-media'); player.controls = true; player.preload = 'auto'; player.src = state.playback;
         playbackElement = player;
+        const loading = loadingPreview('playLoading');
+        listen(player, 'loadeddata', () => { if (state.disposed) return; loading.remove(); preview.setAttribute('aria-busy', 'false'); });
         listen(player, 'loadedmetadata', () => { if (state.playbackTime > 0 && Number.isFinite(player.duration)) player.currentTime = Math.min(state.playbackTime, player.duration); });
+        listen(player, 'timeupdate', () => { if (!state.disposed && Number.isFinite(player.currentTime)) { state.cutTime = player.currentTime; state.playbackTime = player.currentTime; timelineUpdate?.(); } });
         listen(player, 'error', () => {
           if (state.disposed) return;
           URL.revokeObjectURL(state.playback); objectUrls.delete(state.playback); state.playback = '';
           state.status = t('playError'); state.error = true; render();
-        }); sourceBody.append(player);
-      } else if (state.thumbnails.length) sourceBody.append(image(state.thumbnails[Math.floor(state.thumbnails.length / 2)]));
+        }); preview.append(player, loading);
+      } else {
+        if (state.thumbnails.length) preview.append(image(state.advanced ? state.thumbnails[Math.floor(state.thumbnails.length / 2)] : state.thumbnails.reduce((nearest, candidate) => Math.abs(candidate.actualTime - state.cutTime) < Math.abs(nearest.actualTime - state.cutTime) ? candidate : nearest)));
+        if (state.mediaLoading) preview.append(loadingPreview(state.mediaLoading));
+      }
+      if (state.mediaLoading || state.playback || state.thumbnails.length) sourceBody.append(preview);
       const strip = element('div', 'vr-strip'); strip.setAttribute('aria-label', t('thumbnails'));
       for (const frame of state.thumbnails) { const figure = element('figure', 'vr-thumb'); figure.append(image(frame), element('figcaption', 'ui-text-muted', `${frame.actualTime.toFixed(3)}s`)); strip.append(figure); }
-      sourceBody.append(strip);
-      const play = button(t('play'), playback, false, 'play'); play.disabled ||= state.playbackAttempted || video.size > LIMITS.previewBytes; sourceBody.append(play);
+      if (state.advanced) sourceBody.append(strip);
+      const play = button(t(state.mediaLoading === 'playLoading' ? 'playLoading' : 'play'), playback, false, 'play'); play.disabled ||= state.playbackAttempted || video.size > LIMITS.previewBytes; sourceBody.append(play);
       if (video.size > LIMITS.previewBytes) sourceBody.append(element('p', 'ui-text-muted', t('playLimit')));
       if (state.advanced) {
       const range = element('div', 'vr-pair'); range.append(field(t('start'), state.start, (value) => { state.start = value; }, 'number', '', 'range-start'),
@@ -1016,6 +1063,7 @@ function createSelectRenderer(container, selectProps) {
       closeMentions(false);
       window.removeEventListener('ai-canvas-theme-change', refresh); window.removeEventListener('ai-canvas-locale-change', refresh);
       for (const renderer of selectRenderers) renderer.dispose(); selectRenderers = [];
+      timelineRenderer?.dispose(); timelineRenderer = null; timelineUpdate = null;
       for (const dispose of domListeners) dispose(); domListeners = [];
       stopPlaybackElement();
       for (const url of objectUrls) URL.revokeObjectURL(url); objectUrls.clear(); root.replaceChildren();

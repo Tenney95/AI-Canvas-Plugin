@@ -28,6 +28,7 @@ class Element {
   focus(options) { this.ownerDocument.activeElement = this; this.focusOptions = options; }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   querySelector(selector) { return find(this, (item) => selector === '[data-summary]' && Object.hasOwn(item.dataset, 'summary')
+    || selector === '[data-timeline-preview]' && Object.hasOwn(item.dataset, 'timelinePreview')
     || selector === '[data-quick-summary]' && Object.hasOwn(item.dataset, 'quickSummary')
     || selector === `[data-field="${item.dataset.field}"]`
     || selector === '[data-budget-warning]' && Object.hasOwn(item.dataset, 'budgetWarning')
@@ -76,10 +77,30 @@ function mockSelectRenderer(container, options) {
   const renderer = { options, disposals: 0, dispose() { this.disposals++; container.replaceChildren(); } };
   doc.selectRenderers.push(renderer); return renderer;
 }
+function mockTimelineRenderer(container) {
+  const doc = container.ownerDocument;
+  const renderer = { options: null, disposals: 0, updates: 0,
+    update(options) {
+      this.options = options; this.updates++; container.replaceChildren();
+      const input = doc.createElement('input'); input.dataset.field = 'cut-time'; input.value = options.playhead; input.disabled = options.disabled;
+      input.addEventListener('input', () => { if (!input.disabled) options.onSeek(Number(input.value)); }); container.append(input);
+      const add = (label, action, fn, disabled = options.disabled) => {
+        const button = doc.createElement('button'); button.textContent = label; button.dataset.action = action; button.disabled = disabled;
+        button.addEventListener('click', () => { if (!button.disabled) fn(); }); container.append(button);
+      };
+      add(options.labels.addMarker, 'add-cut', () => options.onAddMarker(options.playhead));
+      add(options.labels.resetMarkers, 'clear-cuts', options.onResetMarkers, options.disabled || !options.markers.length);
+      for (const marker of options.markers) add(String(marker.time), `remove-cut-${marker.time}`, () => options.onRemoveMarker(marker.id));
+      for (const segment of options.segments) { const node = doc.createElement('span'); node.textContent = segment.label; container.append(node); }
+    },
+    dispose() { this.disposals++; container.replaceChildren(); },
+  };
+  doc.timelineRenderers.push(renderer); return renderer;
+}
 function runtime() {
   const events = new Map(); const revoked = []; const blobs = [];
   const timers = new Map(); let nextTimer = 0;
-  const doc = { selectRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
+  const doc = { timelineRenderers: [], selectRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
   doc.documentElement = new Element('html', doc);
   const window = {
     __AI_CANVAS_PLUGIN_HOST__: { exports: {} },
@@ -92,10 +113,10 @@ function runtime() {
     createObjectURL: (blob) => { blobs.push(blob); return 'blob:test-preview'; }, revokeObjectURL: (url) => revoked.push(url),
   } });
   // Test-only injection: production bundle exports only its mount function.
-  const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedUiKitCss = ''; const sharedPickerCss = ''; const createSelectRenderer = ${mockSelectRenderer.toString()}; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
+  const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedUiKitCss = ''; const sharedPickerCss = ''; const createTimelineRenderer = ${mockTimelineRenderer.toString()}; const createSelectRenderer = ${mockSelectRenderer.toString()}; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
   new Script(executable.replace('const bridge = window.__AI_CANVAS_PLUGIN_HOST__;',
     'globalThis.helpers = { validateShots, planSamples, parseModelResponse, nodeCount, buildPrompt, generationParameters, mentionRange, mentionItems, segmentLimit, planSegments }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
-  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, timers,
+  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, timelineRenderers: doc.timelineRenderers, timers,
     fireTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback(); } };
 }
 function props(overrides = {}) {
@@ -530,6 +551,53 @@ test('manual cut points can be added, removed and reset while overlong intervals
   edit(ui.root, 'cut-time', 20); await click(ui.root, 'add-cut');
   edit(ui.root, 'cut-time', 20); await click(ui.root, 'add-cut'); assert.match(texts(ui.root), /不能重复/);
   await click(ui.root, 'quick-start'); assert.deepEqual(requests[0].cuts, [20]); cleanup();
+});
+
+test('timeline moves keep marker identity, reject duplicate/end cuts, and submit complete coverage', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(clone(request)); return { ok: true, value: jobSnapshot() }; })); await flush();
+  const timeline = ui.timelineRenderers.at(-1);
+  timeline.options.onAddMarker(20); timeline.options.onAddMarker(40);
+  const firstId = timeline.options.markers[0].id;
+  timeline.options.onMoveMarker(firstId, 23.1234);
+  assert.deepEqual(clone(timeline.options.markers.map(({ time }) => time)), [23.123, 40]);
+  assert.equal(timeline.options.markers[0].id, firstId);
+  timeline.options.onMoveMarker(firstId, 40); timeline.options.onMoveMarker(firstId, 0); timeline.options.onAddMarker(60);
+  assert.deepEqual(clone(timeline.options.markers.map(({ time }) => time)), [23.123, 40]);
+  assert.match(texts(ui.root), /不能重复/);
+  timeline.options.onSeek(200); assert.equal(timeline.options.playhead, 60);
+  timeline.options.onSeek(-1); assert.equal(timeline.options.playhead, 0);
+  await click(ui.root, 'quick-start'); assert.deepEqual(requests[0].cuts, [23.123, 40]);
+  assert.equal(ui.timelineRenderers.at(-1).options.disabled, true);
+  assert.equal(timeline.disposals, 1); cleanup();
+  assert.ok(ui.timelineRenderers.every((item) => item.disposals === 1));
+});
+
+test('timeline preserves viewport across theme redraw and follows playback without remounting', async () => {
+  const ui = runtime(); const cleanup = ui.mount(ui.root, quickProps()); await flush();
+  let timeline = ui.timelineRenderers.at(-1);
+  timeline.options.onViewChange({ pixelsPerSecond: 50, scrollLeft: 200 });
+  for (const fn of ui.events.get('ai-canvas-theme-change')) fn();
+  timeline = ui.timelineRenderers.at(-1);
+  assert.deepEqual(clone(timeline.options.viewState), { pixelsPerSecond: 50, scrollLeft: 200 });
+  await click(ui.root, 'play'); timeline = ui.timelineRenderers.at(-1);
+  const player = find(ui.root, (node) => node.tagName === 'video'); assert.ok(player);
+  const previousUpdates = timeline.updates; player.currentTime = 18.5; player.dispatch('timeupdate');
+  assert.equal(timeline.options.playhead, 18.5); assert.ok(timeline.updates > previousUpdates); assert.equal(timeline.disposals, 0);
+  timeline.options.onSeek(7); assert.equal(player.currentTime, 7);
+  cleanup(); player.currentTime = 20; player.dispatch('timeupdate'); assert.equal(timeline.disposals, 1);
+});
+
+test('scrubbing uses the nearest extracted frame when playback is unavailable', async () => {
+  const ui = runtime(); const base = quickProps(async () => ({ ok: true, value: jobSnapshot() }));
+  const cleanup = ui.mount(ui.root, { ...base, async runEffect(effect) {
+    if (effect.type === 'video.extractFrames') return { ok: true, value: { video: { duration: 60, width: 1280, height: 720 },
+      frames: [{ actualTime: 1, previewDataUrl: sample }, { actualTime: 50, previewDataUrl: 'data:image/jpeg;base64,BB==' }] } };
+    return base.runEffect(effect);
+  } }); await flush();
+  const timeline = ui.timelineRenderers.at(-1); timeline.options.onSeek(48);
+  assert.equal(find(ui.root, (node) => Object.hasOwn(node.dataset, 'timelinePreview')).src, 'data:image/jpeg;base64,BB==');
+  assert.equal(timeline.options.playhead, 48); cleanup();
 });
 test('first speech model download requires an explicit second click and sends only that authorization', async () => {
   const ui = runtime(); const requests = [];
