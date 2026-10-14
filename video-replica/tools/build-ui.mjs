@@ -20,16 +20,18 @@ const [{ build }, postcssModule, tailwindModule, react, server, icons, configMod
 ]);
 const pickerPath = resolve(hostRoot, 'src/components/shared/MentionPicker.tsx');
 const selectPath = resolve(hostRoot, 'src/components/shared/Select.tsx');
+const modelPickerPath = resolve(hostRoot, 'src/components/shared/ModelPicker.tsx');
 const timelinePath = resolve(hostRoot, 'src/components/shared/Timeline.tsx');
 const referenceChipPath = resolve(hostRoot, 'src/components/shared/referenceChipDom.ts');
 const uiKitPath = resolve(hostRoot, 'src/styles/ui-kit.css');
 const basePath = resolve(hostRoot, 'src/styles/base.css');
 const pickerCssPath = resolve(hostRoot, 'src/styles/mention-picker.css');
-const [source, pickerSource, baseCss, pickerCss, uiKitCss, selectSource, timelineSource, manifestSource, referenceChipSource, referenceEditorSource] = await Promise.all([
+const [source, pickerSource, baseCss, pickerCss, uiKitCss, selectSource, timelineSource, manifestSource, referenceChipSource, referenceEditorSource, modelPickerSource] = await Promise.all([
   utf8(resolve(pluginRoot, 'src/ui.js')), utf8(pickerPath), utf8(basePath), utf8(pickerCssPath), utf8(uiKitPath), utf8(selectPath), utf8(timelinePath), utf8(resolve(pluginRoot, 'manifest.json')),
   utf8(referenceChipPath), utf8(resolve(pluginRoot, 'src/referenceEditor.js')),
+  utf8(modelPickerPath),
 ]);
-const cssConfig = { ...configModule.default, content: [{ raw: pickerSource, extension: 'tsx' }, { raw: selectSource, extension: 'tsx' }, { raw: timelineSource, extension: 'tsx' }, { raw: source, extension: 'js' }, { raw: referenceChipSource, extension: 'ts' }, { raw: referenceEditorSource, extension: 'js' }] };
+const cssConfig = { ...configModule.default, content: [{ raw: pickerSource, extension: 'tsx' }, { raw: selectSource, extension: 'tsx' }, { raw: modelPickerSource, extension: 'tsx' }, { raw: timelineSource, extension: 'tsx' }, { raw: source, extension: 'js' }, { raw: referenceChipSource, extension: 'ts' }, { raw: referenceEditorSource, extension: 'js' }] };
 const postcss = postcssModule.default;
 // Share design tokens, not the host window's fixed layout and scrolling policy.
 // Inspect top-level AST nodes only: descendant selectors and application rules stay in the host.
@@ -62,6 +64,7 @@ const iconNames = {
   'lucide:images': 'Images', 'lucide:film': 'Film', 'lucide:image': 'Image',
   'lucide:file-text': 'FileText', 'lucide:music': 'Music', 'lucide:user': 'User',
   'lucide:landmark': 'Landmark', 'lucide:box': 'Box', 'lucide:play': 'Play', 'lucide:pause': 'Pause',
+  'lucide:search': 'Search', 'lucide:x': 'X',
 };
 const localIcons = Object.fromEntries(Object.entries(iconNames).map(([name, exportName]) => {
   if (!icons[exportName]) throw new Error(`Missing existing lucide icon: ${exportName}`);
@@ -83,6 +86,7 @@ const result = await build({
   plugins: [{ name: 'shared-host-picker', setup(builder) {
     builder.onResolve({ filter: /^@host\/MentionPicker$/ }, () => ({ path: pickerPath }));
     builder.onResolve({ filter: /^@host\/Select$/ }, () => ({ path: selectPath }));
+    builder.onResolve({ filter: /^@host\/ModelPicker$/ }, () => ({ path: modelPickerPath }));
     builder.onResolve({ filter: /^@host\/Timeline$/ }, () => ({ path: timelinePath }));
     builder.onResolve({ filter: /^@host\/referenceChipDom$/ }, () => ({ path: referenceChipPath }));
     builder.onResolve({ filter: /^@host\// }, ({ path }) => {

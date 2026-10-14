@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { addIcon } from '@iconify/react';
 import MentionPicker from '@host/MentionPicker';
 import Select from '@host/Select';
+import ModelPicker from '@host/ModelPicker';
 import Timeline from '@host/Timeline';
 import sharedUiKitCss from '@host/ui-kit.css';
 import sharedPickerCss from '@host/mention-picker.css';
@@ -39,6 +40,17 @@ function createSelectRenderer(container, selectProps) {
     if (!disposed) reactRoot.render(createElement(Select, { ...selectProps, value, onChange }));
   };
   reactRoot.render(createElement(Select, { ...selectProps, onChange }));
+  return { dispose() { if (!disposed) { disposed = true; reactRoot.unmount(); } } };
+}
+function createModelPickerRenderer(container, pickerProps) {
+  const reactRoot = createRoot(container);
+  let disposed = false;
+  const onChange = (value) => {
+    if (disposed) return;
+    pickerProps.onChange(value);
+    if (!disposed) reactRoot.render(createElement(ModelPicker, { ...pickerProps, value, onChange }));
+  };
+  reactRoot.render(createElement(ModelPicker, { ...pickerProps, onChange }));
   return { dispose() { if (!disposed) { disposed = true; reactRoot.unmount(); } } };
 }
 function createTimelineRenderer(container) {
@@ -617,6 +629,36 @@ function createTimelineRenderer(container) {
       }));
       wrap.append(control); return wrap;
     }
+    function modelField(label, value, choices, change, identifier, placeholder) {
+      const groups = new Map();
+      for (const model of choices) {
+        const summary = model.group;
+        const provider = typeof model.provider === 'string' && model.provider.trim() ? model.provider : 'other';
+        const groupId = typeof summary?.id === 'string' && summary.id ? summary.id : `provider:${provider}`;
+        if (!groups.has(groupId)) {
+          groups.set(groupId, {
+            id: groupId,
+            label: typeof summary?.name === 'string' && summary.name ? summary.name : provider,
+            description: typeof summary?.description === 'string' ? summary.description : undefined,
+            badgeText: typeof summary?.badgeText === 'string' ? summary.badgeText : undefined,
+            tone: ['brand', 'success', 'info', 'danger', 'warning'].includes(summary?.tone) ? summary.tone : undefined,
+            items: [],
+          });
+        }
+        const description = [typeof model.description === 'string' ? model.description : undefined,
+          model.category === 'video' && model.videoCapability?.maxVideoReferences === 0 ? t('incompatibleVideo') : undefined]
+          .filter(Boolean).join(' · ');
+        groups.get(groupId).items.push({ value: model.id, label: model.name,
+          description: description || undefined, title: description ? `${model.name}\n${description}` : model.name });
+      }
+      const wrap = element('div', 'ui-field'); wrap.append(element('span', 'ui-field__label', label));
+      const control = element('div'); control.dataset.selectField = identifier;
+      selectRenderers.push(createModelPickerRenderer(control, {
+        groups: [...groups.values()], value, onChange: change, disabled: locked(), name: identifier,
+        'aria-label': label, placeholder, clearLabel: placeholder, emptyText: placeholder,
+      }));
+      wrap.append(control); return wrap;
+    }
     function image(frame) {
       if (!frame || typeof frame.previewDataUrl !== 'string' || frame.previewDataUrl.length > 240000
         || !/^data:image\/(jpeg|png|webp);base64,[a-zA-Z0-9+/=]+$/.test(frame.previewDataUrl)) return element('span', 'ui-text-muted', t('frame'));
@@ -965,17 +1007,15 @@ function createTimelineRenderer(container) {
         listen(checkbox, 'change', () => { if (checkbox.checked) state.controls.add(key); else state.controls.delete(key); updateSummary(); }); label.append(checkbox, element('span', '', t(key))); controls.append(label); }
       settingsBody.append(controls, element('p', 'ui-text-muted', t(state.advanced ? 'controlHint' : 'quickControlHint')));
       if (state.advanced) {
-      settingsBody.append(selectField(t('model'), state.model,
-        [{ value: '', label: t('chooseModel') }, ...models.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider}` }))],
-        (value) => { state.model = value; }, 'model'), element('p', 'ui-text-muted', models.length ? t('modelHint') : t('noModels')));
+      settingsBody.append(modelField(t('model'), state.model, models,
+        (value) => { state.model = value; }, 'model', t('chooseModel')), element('p', 'ui-text-muted', models.length ? t('modelHint') : t('noModels')));
       settingsBody.append(selectField(t('generation'), state.generationBackend,
         [{ value: 'materials', label: t('materials') }, { value: 'model', label: t('relay') }, { value: 'comfyui', label: t('comfyui') }],
         (value) => { state.generationBackend = value; state.videoModel = ''; render(); }, 'generation-backend'));
       if (state.generationBackend !== 'materials') {
         const choices = videoModels.filter((model) => state.generationBackend === 'comfyui' ? model.provider === 'comfyui' : model.provider !== 'comfyui');
-        settingsBody.append(selectField(t('generationModel'), state.videoModel,
-          [{ value: '', label: t(state.generationBackend === 'comfyui' ? 'chooseWorkflow' : 'chooseVideo') }, ...choices.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider}` }))],
-          (value) => { state.videoModel = value; }, 'generation-model'));
+        settingsBody.append(modelField(t('generationModel'), state.videoModel, choices,
+          (value) => { state.videoModel = value; }, 'generation-model', t(state.generationBackend === 'comfyui' ? 'chooseWorkflow' : 'chooseVideo')));
         if (!choices.length) settingsBody.append(element('p', 'ui-alert', t(state.generationBackend === 'comfyui' ? 'noWorkflow' : 'noVideo')));
         const params = element('div', 'vr-pair');
         params.append(selectField(t('aspectRatio'), state.aspectRatio,
@@ -988,18 +1028,16 @@ function createTimelineRenderer(container) {
         if (state.generationBackend === 'comfyui') settingsBody.append(element('p', 'ui-text-muted', t('comfyHint')));
       }
       } else {
-        settingsBody.append(selectField(t('generationModel'), state.quickModel,
-          [{ value: '', label: t('chooseVideo') }, ...quickVideoModels.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider}${model.videoCapability?.maxVideoReferences === 0 ? ' · ⚠' : ''}` }))],
-          (value) => { state.quickModel = value; render(); }, 'quick-model'));
+        settingsBody.append(modelField(t('generationModel'), state.quickModel, quickVideoModels,
+          (value) => { state.quickModel = value; render(); }, 'quick-model', t('chooseVideo')));
         if (!quickVideoModels.length) settingsBody.append(element('p', 'ui-alert', t('noVideo')));
         const chosen = quickVideoModels.find((model) => model.id === state.quickModel);
         if (!chosen?.videoCapability?.maxDuration && !chosen?.videoCapability?.durations?.length) {
           settingsBody.append(element('p', 'ui-text-muted', t('durationUnknown')),
             field(t('segmentSeconds'), state.maxSegmentSeconds, (value) => { state.maxSegmentSeconds = value; }, 'number', '', 'segment-seconds'));
         }
-        settingsBody.append(selectField(t('model'), state.model,
-          [{ value: '', label: t('optional') }, ...models.map((model) => ({ value: model.id, label: `${model.name} · ${model.provider}` }))],
-          (value) => { state.model = value; }, 'model'));
+        settingsBody.append(modelField(t('model'), state.model, models,
+          (value) => { state.model = value; }, 'model', t('optional')));
         settingsBody.append(selectField(t('quickAudio'), state.audioMode,
           ['original', 'model', 'mute'].map((value) => ({ value, label: t(`${value}Audio`) })),
           (value) => { state.audioMode = value; updateSummary(); }, 'audio-mode'), element('p', 'ui-text-muted', t('audioHint')));

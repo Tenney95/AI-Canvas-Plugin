@@ -68,7 +68,7 @@ function mockMentionRenderer(container, onCommit) {
   };
   doc.renderers.push(renderer); return renderer;
 }
-function mockSelectRenderer(container, options) {
+function createSelectRenderer(container, options) {
   const doc = container.ownerDocument;
   const select = doc.createElement('select'); select.dataset.field = options.name;
   select.value = options.value; select.disabled = options.disabled;
@@ -77,6 +77,20 @@ function mockSelectRenderer(container, options) {
   container.append(select);
   const renderer = { options, disposals: 0, dispose() { this.disposals++; container.replaceChildren(); } };
   doc.selectRenderers.push(renderer); return renderer;
+}
+function mockModelPickerRenderer(container, options) {
+  const groupedOptions = options.groups.flatMap((group) => group.items);
+  const renderer = createSelectRenderer(container, {
+    ...options,
+    options: [...(options.clearLabel ? [{ value: '', label: options.clearLabel }] : []), ...groupedOptions],
+    onChange: (value) => {
+      const group = options.groups.find((candidate) => candidate.items.some((item) => item.value === value));
+      const selected = group?.items.find((item) => item.value === value);
+      if (value === '' && options.clearLabel || selected && !selected.disabled && !group.disabled) options.onChange(value);
+    },
+  });
+  renderer.options = options; renderer.kind = 'model';
+  container.ownerDocument.modelRenderers.push(renderer); return renderer;
 }
 function mockTimelineRenderer(container) {
   const doc = container.ownerDocument;
@@ -119,7 +133,7 @@ function mockReferenceEditor(doc, options) {
 function runtime() {
   const events = new Map(); const revoked = []; const blobs = [];
   const timers = new Map(); let nextTimer = 0;
-  const doc = { referenceEditors: [], timelineRenderers: [], selectRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
+  const doc = { referenceEditors: [], timelineRenderers: [], selectRenderers: [], modelRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
   doc.documentElement = new Element('html', doc);
   const window = {
     __AI_CANVAS_PLUGIN_HOST__: { exports: {} },
@@ -132,10 +146,10 @@ function runtime() {
     createObjectURL: (blob) => { blobs.push(blob); return 'blob:test-preview'; }, revokeObjectURL: (url) => revoked.push(url),
   } });
   // Test-only injection: production bundle exports only its mount function.
-  const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedUiKitCss = ''; const sharedPickerCss = ''; const createTimelineRenderer = ${mockTimelineRenderer.toString()}; const createSelectRenderer = ${mockSelectRenderer.toString()}; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
+  const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedUiKitCss = ''; const sharedPickerCss = ''; const createTimelineRenderer = ${mockTimelineRenderer.toString()}; const createSelectRenderer = ${createSelectRenderer.toString()}; const createModelPickerRenderer = ${mockModelPickerRenderer.toString()}; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
   new Script(executable.replace('const bridge = window.__AI_CANVAS_PLUGIN_HOST__;',
     'globalThis.helpers = { validateShots, planSamples, parseModelResponse, nodeCount, buildPrompt, generationParameters, mentionRange, mentionItems, segmentLimit, planSegments }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
-  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, timelineRenderers: doc.timelineRenderers, timers,
+  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, modelRenderers: doc.modelRenderers, timelineRenderers: doc.timelineRenderers, timers,
     fireTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback(); } };
 }
 function props(overrides = {}) {
@@ -701,6 +715,7 @@ test('observation without source grants shows progress and only queries or cance
 });
 test('editable source imports the actual shared picker and generated artifact stays within host limits', async () => {
   assert.match(source, /import MentionPicker from '@host\/MentionPicker'/);
+  assert.match(source, /import ModelPicker from '@host\/ModelPicker'/);
   assert.match(source, /import sharedPickerCss from '@host\/mention-picker\.css'/);
   const artifact = await readFile(new URL('../ui.js', import.meta.url)); assert.ok(artifact.length <= 2 * 1024 * 1024);
   new Script(new TextDecoder('utf-8', { fatal: true }).decode(artifact));
@@ -713,11 +728,53 @@ test('shared selects retain values across theme changes, disable during initiali
   await flush();
   const ready = ui.selectRenderers.filter((renderer) => !renderer.disposals);
   assert.ok(ready.length > 0);
-  assert.ok(ready.every((renderer) => renderer.options.fixedMenu && !renderer.options.disabled));
+  assert.ok(ready.every((renderer) => (renderer.kind === 'model' || renderer.options.fixedMenu) && !renderer.options.disabled));
   select(ui.root, 'audio-mode', 'mute');
   options.theme = 'light'; for (const callback of ui.events.get('ai-canvas-theme-change')) callback();
   assert.ok(ready.every((renderer) => renderer.disposals === 1));
   assert.equal(find(ui.root, (item) => item.dataset.field === 'audio-mode').value, 'mute');
   assert.equal(ui.root.ownerDocument.documentElement.dataset.theme, 'light');
   cleanup(); assert.ok(ui.selectRenderers.every((renderer) => renderer.disposals === 1));
+});
+
+test('model menus keep same-provider connections in separate safe groups and preserve execution ids', async () => {
+  const ui = runtime(); const base = quickProps(); const requests = [];
+  const models = [
+    { ...base.models[0], group: { id: 'vision-connection', name: '视觉中转站', badgeText: '中转', tone: 'info' } },
+    { ...base.models[1], group: { id: 'relay-connection', name: '第一中转站', description: '已配置连接', tone: 'brand' } },
+    { ...base.models[1], id: 'general/ccc-video', name: 'CCC 视频模型', description: '已配置的视频能力',
+      group: { id: 'ccc-connection', name: '第二中转站', badgeText: 'CCC', tone: 'success', apiKey: 'fixture-secret', baseUrl: 'https://fixture.invalid' } },
+  ];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => {
+    requests.push(request); return { ok: true, value: jobSnapshot() };
+  }, { models })); await flush();
+  const picker = ui.modelRenderers.find((renderer) => !renderer.disposals && renderer.options.name === 'quick-model');
+  assert.deepEqual(clone(picker.options.groups.map((group) => group.label)), ['第一中转站', '第二中转站']);
+  assert.deepEqual(clone(picker.options.groups.flatMap((group) => group.items.map((item) => item.value))), ['general/video-model', 'general/ccc-video']);
+  assert.equal(picker.options.groups[1].badgeText, 'CCC'); assert.equal(picker.options.groups[1].tone, 'success');
+  assert.equal(picker.options.groups.every((group) => group.items.every((item) => item.value !== '')), true);
+  assert.doesNotMatch(JSON.stringify(picker.options.groups), /apiKey|baseUrl|fixture-secret|fixture\.invalid/);
+  edit(ui.root, 'character', '用户已填写的角色要求'); select(ui.root, 'quick-model', 'general/ccc-video');
+  assert.equal(find(ui.root, (item) => item.dataset.field === 'character').value, '用户已填写的角色要求');
+  select(ui.root, 'model', ''); await click(ui.root, 'quick-start');
+  assert.equal(requests[0].modelId, 'general/ccc-video'); assert.equal(requests[0].analysisModelId, undefined);
+  cleanup(); assert.ok(ui.modelRenderers.every((renderer) => renderer.disposals === 1));
+});
+
+test('older model catalogs fall back to provider groups and reference warnings stay on model items', async () => {
+  const ui = runtime(); const base = quickProps();
+  const cleanup = ui.mount(ui.root, quickProps(undefined, { models: [base.models[0],
+    { ...base.models[1], videoCapability: { maxDuration: 30, maxVideoReferences: 0 } }, base.models[2],
+  ] })); await flush();
+  const quick = ui.modelRenderers.find((renderer) => !renderer.disposals && renderer.options.name === 'quick-model');
+  assert.deepEqual(clone(quick.options.groups.map((group) => group.label)), ['relay', 'comfyui']);
+  const incompatible = quick.options.groups[0].items[0];
+  assert.equal(incompatible.label, 'Relay video'); assert.match(incompatible.description, /不支持参考视频/);
+  assert.match(incompatible.title, /不支持参考视频/); assert.equal(incompatible.value, 'general/video-model');
+  await click(ui.root, 'toggle-advanced');
+  assert.ok(ui.modelRenderers.some((renderer) => !renderer.disposals && renderer.options.name === 'model'));
+  select(ui.root, 'generation-backend', 'model');
+  const advanced = ui.modelRenderers.find((renderer) => !renderer.disposals && renderer.options.name === 'generation-model');
+  assert.equal(advanced.options.groups[0].items[0].value, 'general/video-model');
+  cleanup(); assert.ok(ui.modelRenderers.every((renderer) => renderer.disposals === 1));
 });
