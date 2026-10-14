@@ -39,7 +39,7 @@
   ],
   "ui": {
     "entry": "ui.js",
-    "integrity": "sha256-2ba4b1512a055f1941c84577e3866a2fb761a7b6bde76fb22ba4219ec75cee26",
+    "integrity": "sha256-30974b2c47780de3b617b08fd2db7553b458d5b38bf7fb3632496b85e4ff111e",
     "exports": {
       "replica": "VideoReplica"
     }

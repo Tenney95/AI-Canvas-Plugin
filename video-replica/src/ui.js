@@ -9,6 +9,7 @@ import sharedUiKitCss from '@host/ui-kit.css';
 import sharedPickerCss from '@host/mention-picker.css';
 import sharedBaseCss from '@host/base.css';
 import sharedIcons from '@host/plugin-ui-icons';
+import { createReferenceEditor } from './referenceEditor.js';
 
 /* shared-renderer:start */
 for (const [name, data] of Object.entries(sharedIcons)) addIcon(name, data);
@@ -236,7 +237,7 @@ function createTimelineRenderer(container) {
 
 
     .vr .vr-progress { width: 100%; accent-color: var(--brand); }
-    .vr .ui-field:has(textarea) { position: relative; }
+    .vr .ui-field:has(textarea), .vr .ui-field:has(.ui-reference-editor) { position: relative; }
     .vr .vr-mentions { position: absolute; left: 0; width: min(336px, 100%); z-index: 40;
       padding: 0; gap: 4px; max-height: calc(100vh - 24px); overflow-y: auto; background: var(--theme-surface); box-shadow: 0 20px 48px var(--black-alpha-50); }
     .vr [hidden] { display: none; }
@@ -280,7 +281,7 @@ function createTimelineRenderer(container) {
     return value.items.map((item) => {
       if (!item || typeof item.id !== 'string' || !item.id || item.id.length > 160 || ids.has(item.id)
         || typeof item.label !== 'string' || !item.label.trim() || item.label.length > 200
-        || typeof item.kind !== 'string' || item.kind.length > 40
+        || !['text', 'image', 'video', 'audio', 'character', 'scene', 'prop'].includes(item.kind)
         || typeof item.token !== 'string' || !/^@\{plugin-ref-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[^{}\r\n]{1,200}\}$/i.test(item.token)) throw new Error('mentionInvalid');
       const normalized = { id: item.id, label: item.label, kind: item.kind, token: item.token };
       // Preview grants contain bounded re-encoded pixels, never an asset URL or path.
@@ -298,7 +299,7 @@ function createTimelineRenderer(container) {
         normalized.thumbnailCrop = { x: crop.x, y: crop.y, width: crop.width, height: crop.height };
       }
       if (item.badge !== undefined) {
-        if (typeof item.badge !== 'string' || item.badge.length > 60 || /[\r\n\x00-\x1f]/.test(item.badge)) throw new Error('mentionInvalid');
+        if (typeof item.badge !== 'string' || item.badge.length > 60 || [...item.badge].some((character) => character.charCodeAt(0) < 32)) throw new Error('mentionInvalid');
         normalized.badge = item.badge;
       }
       ids.add(item.id); return normalized;
@@ -411,6 +412,7 @@ function createTimelineRenderer(container) {
     let timelineView = { pixelsPerSecond: null, scrollLeft: 0 };
     let cutIds = new Map(); let nextCutId = 0;
     let activeMention = null; let mentionCounter = 0; let mentionSource = 'nodes'; let mentionInFlight = false; let queuedMention = null;
+    const referenceMetadata = new Map(); let referenceEditors = [];
     const t = (key) => (STRINGS[props.locale] || STRINGS['en-US'])[key] || key;
     const selected = () => state.shots.filter((shot) => shot.selected);
     const jobTerminal = () => Boolean(state.job && ['succeeded', 'failed', 'cancelled', 'paused', 'unknown'].includes(state.job.status));
@@ -432,16 +434,30 @@ function createTimelineRenderer(container) {
     }
     function field(label, value, change, type, placeholder, identifier) {
       const wrap = element(type === 'textarea' ? 'div' : 'label', 'ui-field'); wrap.append(element('span', 'ui-field__label', label));
-      const input = element(type === 'textarea' ? 'textarea' : 'input', type === 'textarea' ? 'ui-textarea' : 'ui-input');
+      const references = type === 'textarea' && ['character', 'scene', 'prompt'].includes(identifier);
+      let input, feedback;
+      if (references) {
+        feedback = element('span', 'ui-text-muted'); feedback.hidden = true; feedback.setAttribute('role', 'status');
+        const editor = createReferenceEditor(doc, { label, value: String(value), disabled: locked(), placeholder,
+          maxLength: identifier === 'prompt' ? 8000 : 2000, resolveReference: (token) => referenceMetadata.get(token),
+          kindLabel: (kind) => props.locale === 'zh-CN'
+            ? ({ image: '图像素材', video: '视频素材', audio: '音频素材', text: '文本内容', character: '角色素材', scene: '场景素材', prop: '道具素材' })[kind]
+            : ({ image: 'Image', video: 'Video', audio: 'Audio', text: 'Text', character: 'Character', scene: 'Scene', prop: 'Prop' })[kind],
+          onLimit: () => { feedback.textContent = t('mentionTextLimit'); feedback.hidden = false; } });
+        referenceEditors.push(editor); input = editor.input;
+      } else input = element(type === 'textarea' ? 'textarea' : 'input', type === 'textarea' ? 'ui-textarea' : 'ui-input');
       input.setAttribute('aria-label', label);
       if (type && type !== 'textarea') input.type = type;
       input.value = String(value); input.disabled = locked(); if (placeholder) input.placeholder = placeholder;
       if (identifier) input.dataset.field = identifier;
       if (type === 'number') { input.step = '0.001'; input.min = '0'; input.max = String(state.duration); }
       if (identifier === 'segment-seconds') { input.min = '.001'; input.max = '30'; }
-      listen(input, 'input', () => { change(type === 'number' ? Number(input.value) : input.value); updateSummary(); });
+      listen(input, 'input', () => {
+        if (feedback && input.getAttribute('aria-invalid') !== 'true') feedback.hidden = true;
+        change(type === 'number' ? Number(input.value) : input.value); updateSummary();
+      });
       wrap.append(input);
-      if (type === 'textarea' && ['character', 'scene', 'prompt'].includes(identifier)) attachMentions(input, wrap, change, identifier === 'prompt' ? 8000 : 2000);
+      if (references) { wrap.append(feedback); attachMentions(input, wrap, change, identifier === 'prompt' ? 8000 : 2000); }
       return wrap;
     }
     function closeMentions(restore) {
@@ -504,6 +520,7 @@ function createTimelineRenderer(container) {
       if (state.disposed || activeMention !== current || current.input.value !== current.expectedValue) { closeMentions(false); return; }
       const value = current.input.value.slice(0, current.start) + item.token + ' ' + current.input.value.slice(current.end);
       if (value.length > current.limit) { current.error = t('mentionTextLimit'); paintMentions(current); return; }
+      referenceMetadata.set(item.token, item);
       current.input.value = value; current.change(value); updateSummary();
       const caret = current.start + item.token.length + 1; closeMentions(true); current.input.setSelectionRange(caret, caret);
     }
@@ -871,6 +888,7 @@ function createTimelineRenderer(container) {
       if (state.disposed) return;
       const scrollTop = root.scrollTop || 0;
       closeMentions(false);
+      for (const editor of referenceEditors) editor.dispose(); referenceEditors = [];
       for (const renderer of selectRenderers) renderer.dispose(); selectRenderers = [];
       timelineRenderer?.dispose(); timelineRenderer = null; timelineUpdate = null;
       for (const dispose of domListeners) dispose(); domListeners = [];
@@ -1062,6 +1080,7 @@ function createTimelineRenderer(container) {
       if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; }
       closeMentions(false);
       window.removeEventListener('ai-canvas-theme-change', refresh); window.removeEventListener('ai-canvas-locale-change', refresh);
+      for (const editor of referenceEditors) editor.dispose(); referenceEditors = []; referenceMetadata.clear();
       for (const renderer of selectRenderers) renderer.dispose(); selectRenderers = [];
       timelineRenderer?.dispose(); timelineRenderer = null; timelineUpdate = null;
       for (const dispose of domListeners) dispose(); domListeners = [];

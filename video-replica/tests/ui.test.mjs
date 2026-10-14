@@ -21,6 +21,7 @@ class Element {
   remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((item) => item !== this); this.parentElement = null; }
   contains(item) { return item === this || this.children.some((child) => child.contains(item)); }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   removeAttribute(name) { delete this.attributes[name]; }
   addEventListener(name, fn) { if (!this.listeners.has(name)) this.listeners.set(name, new Set()); this.listeners.get(name).add(fn); }
   removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
@@ -39,7 +40,7 @@ function find(root, predicate) {
   return undefined;
 }
 function texts(root) { return [root.textContent, ...root.children.map(texts)].flat(Infinity).join(' '); }
-// Only the shared React renderer is mocked. Selection/effects/paging/leases remain real source logic.
+// 共享 React 展示和编辑控件使用夹具；选取、effect、分页与租约保留真实 UI 接入逻辑。
 function mockMentionRenderer(container, onCommit) {
   const doc = container.ownerDocument;
   const renderer = { updates: 0, disposals: 0, props: null,
@@ -97,17 +98,35 @@ function mockTimelineRenderer(container) {
   };
   doc.timelineRenderers.push(renderer); return renderer;
 }
+// 控件本身的真实 DOM/光标/剪贴板逻辑由 referenceEditor.test.mjs 覆盖。
+function mockReferenceEditor(doc, options) {
+  const input = doc.createElement('div'); input.className = 'ui-textarea ui-reference-editor';
+  input.setAttribute('role', 'textbox'); let value = '';
+  const paint = () => {
+    input.replaceChildren();
+    for (const token of value.match(/@\{plugin-ref-[^{}]+\}/g) || []) {
+      const reference = options.resolveReference(token); const chip = doc.createElement('span');
+      chip.className = 'ui-reference-chip'; chip.dataset.referenceToken = token;
+      chip.textContent = reference?.badge || reference?.label || '引用';
+      if (reference?.thumbnailDataUrl) { const image = doc.createElement('img'); image.src = reference.thumbnailDataUrl; chip.append(image); }
+      input.append(chip);
+    }
+  };
+  Object.defineProperty(input, 'value', { get: () => value, set: (text) => { value = String(text); paint(); } });
+  const editor = { input, disposals: 0, refreshReferences: paint, dispose() { this.disposals++; } };
+  doc.referenceEditors.push(editor); input.value = options.value; return editor;
+}
 function runtime() {
   const events = new Map(); const revoked = []; const blobs = [];
   const timers = new Map(); let nextTimer = 0;
-  const doc = { timelineRenderers: [], selectRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
+  const doc = { referenceEditors: [], timelineRenderers: [], selectRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
   doc.documentElement = new Element('html', doc);
   const window = {
     __AI_CANVAS_PLUGIN_HOST__: { exports: {} },
     addEventListener(name, fn) { if (!events.has(name)) events.set(name, new Set()); events.get(name).add(fn); },
     removeEventListener(name, fn) { events.get(name)?.delete(fn); },
   };
-  const context = createContext({ window, Blob, Uint8Array, atob,
+  const context = createContext({ window, Blob, Uint8Array, atob, createReferenceEditor: mockReferenceEditor,
     setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearTimeout: (id) => timers.delete(id), URL: {
     createObjectURL: (blob) => { blobs.push(blob); return 'blob:test-preview'; }, revokeObjectURL: (url) => revoked.push(url),
@@ -307,6 +326,23 @@ test('mentions in replacement requirements and shot prompts remain opaque throug
   assert.equal(submitted.character, `${reference().token} `); assert.equal(submitted.scene, `${reference().token} `); assert.equal(submitted.shots[0].prompt, `${reference().token} `);
   assert.ok(requests.find((request) => request.type === 'model.generate').prompt.includes(reference().token));
   assert.doesNotMatch(JSON.stringify(submitted), /@asset|https?:|filePath|apiKey|D:\\/); cleanup();
+});
+
+test('reference capsules show safe thumbnails and badges and retain the serialized draft after theme repaint', async () => {
+  const ui = runtime(); const options = props(); const run = options.runEffect;
+  options.runEffect = (request) => request.type === 'prompt.mentions'
+    ? Promise.resolve(mentionResponse([{ ...reference(), badge: '#39', thumbnailDataUrl: sample }])) : run(request);
+  const cleanup = ui.mount(ui.root, options); await flush();
+  let input = find(ui.root, (item) => item.dataset.field === 'character'); typeAt(input, '替换为 @'); await flush();
+  input.dispatch('keydown', { key: 'Enter' });
+  const value = `替换为 ${reference().token} `;
+  assert.equal(input.value, value); assert.equal(input.attributes.role, 'textbox');
+  const chip = find(input, (item) => item.dataset.referenceToken === reference().token);
+  assert.equal(chip.textContent, '#39'); assert.equal(chip.children[0].src, sample);
+  options.theme = 'light'; for (const callback of ui.events.get('ai-canvas-theme-change')) callback();
+  input = find(ui.root, (item) => item.dataset.field === 'character'); assert.equal(input.value, value);
+  assert.equal(find(input, (item) => item.dataset.referenceToken === reference().token).textContent, '#39');
+  cleanup(); assert.ok(ui.root.ownerDocument.referenceEditors.every((editor) => editor.disposals === 1));
 });
 
 test('IME input does not query until committed and Escape preserves text', async () => {

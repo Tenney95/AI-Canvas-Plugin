@@ -21,13 +21,15 @@ const [{ build }, postcssModule, tailwindModule, react, server, icons, configMod
 const pickerPath = resolve(hostRoot, 'src/components/shared/MentionPicker.tsx');
 const selectPath = resolve(hostRoot, 'src/components/shared/Select.tsx');
 const timelinePath = resolve(hostRoot, 'src/components/shared/Timeline.tsx');
+const referenceChipPath = resolve(hostRoot, 'src/components/shared/referenceChipDom.ts');
 const uiKitPath = resolve(hostRoot, 'src/styles/ui-kit.css');
 const basePath = resolve(hostRoot, 'src/styles/base.css');
 const pickerCssPath = resolve(hostRoot, 'src/styles/mention-picker.css');
-const [source, pickerSource, baseCss, pickerCss, uiKitCss, selectSource, timelineSource, manifestSource] = await Promise.all([
+const [source, pickerSource, baseCss, pickerCss, uiKitCss, selectSource, timelineSource, manifestSource, referenceChipSource, referenceEditorSource] = await Promise.all([
   utf8(resolve(pluginRoot, 'src/ui.js')), utf8(pickerPath), utf8(basePath), utf8(pickerCssPath), utf8(uiKitPath), utf8(selectPath), utf8(timelinePath), utf8(resolve(pluginRoot, 'manifest.json')),
+  utf8(referenceChipPath), utf8(resolve(pluginRoot, 'src/referenceEditor.js')),
 ]);
-const cssConfig = { ...configModule.default, content: [{ raw: pickerSource, extension: 'tsx' }, { raw: selectSource, extension: 'tsx' }, { raw: timelineSource, extension: 'tsx' }, { raw: source, extension: 'js' }] };
+const cssConfig = { ...configModule.default, content: [{ raw: pickerSource, extension: 'tsx' }, { raw: selectSource, extension: 'tsx' }, { raw: timelineSource, extension: 'tsx' }, { raw: source, extension: 'js' }, { raw: referenceChipSource, extension: 'ts' }, { raw: referenceEditorSource, extension: 'js' }] };
 const postcss = postcssModule.default;
 // Share design tokens, not the host window's fixed layout and scrolling policy.
 // Inspect top-level AST nodes only: descendant selectors and application rules stay in the host.
@@ -82,6 +84,7 @@ const result = await build({
     builder.onResolve({ filter: /^@host\/MentionPicker$/ }, () => ({ path: pickerPath }));
     builder.onResolve({ filter: /^@host\/Select$/ }, () => ({ path: selectPath }));
     builder.onResolve({ filter: /^@host\/Timeline$/ }, () => ({ path: timelinePath }));
+    builder.onResolve({ filter: /^@host\/referenceChipDom$/ }, () => ({ path: referenceChipPath }));
     builder.onResolve({ filter: /^@host\// }, ({ path }) => {
       if (!Object.hasOwn(virtualModules, path)) throw new Error(`Unknown shared import: ${path}`);
       return { path, namespace: 'shared-host' };
@@ -98,9 +101,11 @@ const licenseFiles = [
   ['Lucide React', resolve(hostRoot, 'node_modules/lucide-react/LICENSE')],
 ];
 const licenses = await Promise.all(licenseFiles.map(async ([name, path]) => `/*! ${name}\n${(await utf8(path)).replace(/\*\//g, '* /')}\n*/\n`));
-const bytes = Buffer.concat([Buffer.from(licenses.join(''), 'utf8'), Buffer.from(result.outputFiles[0].contents)]);
+const bundled = Buffer.concat([Buffer.from(licenses.join(''), 'utf8'), Buffer.from(result.outputFiles[0].contents)]);
+// 安装摘要绑定实际字节，统一上游许可证的换行后再计算摘要。
+const output = new TextDecoder('utf-8', { fatal: true }).decode(bundled).replace(/\r\n?/g, '\n');
+const bytes = Buffer.from(output, 'utf8');
 if (bytes.length > 2 * 1024 * 1024) throw new Error('UI exceeds the host 2 MiB limit');
-const output = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 new Script(output);
 if (/sourceMappingURL|D:\\www|D:\/www/.test(output)) throw new Error('UI must not expose build paths or source maps');
 const manifest = JSON.parse(manifestSource);
