@@ -251,7 +251,9 @@ function createTimelineRenderer(container) {
     .vr .vr-progress { width: 100%; accent-color: var(--brand); }
     .vr .ui-field:has(textarea), .vr .ui-field:has(.ui-reference-editor) { position: relative; }
     .vr .vr-mentions { position: absolute; left: 0; width: min(336px, 100%); z-index: 40;
-      padding: 0; gap: 4px; max-height: calc(100vh - 24px); overflow-y: auto; background: var(--theme-surface); box-shadow: 0 20px 48px var(--black-alpha-50); }
+      padding: 0; max-height: calc(100vh - 24px); }
+    .vr .vr-mentions.is-resizing { transition: top var(--transition-smooth); }
+    @media (prefers-reduced-motion: reduce) { .vr .vr-mentions.is-resizing { transition: none; } }
     .vr [hidden] { display: none; }
     .vr h1 { margin: 0; font-size: 18px; line-height: 1.4; } .vr p { margin: 0; }
     .vr label:has(input[type='checkbox']) { display: inline-flex; gap: 6px; align-items: center; }
@@ -479,18 +481,21 @@ function createTimelineRenderer(container) {
       current.panel.remove(); current.input.setAttribute('aria-expanded', 'false'); current.input.removeAttribute('aria-activedescendant'); current.input.removeAttribute('aria-controls');
       if (restore && !state.disposed) current.input.focus({ preventScroll: true });
     }
-    function mentionListen(current, node, name, fn) {
-      node.addEventListener(name, fn); current.listeners.push(() => node.removeEventListener(name, fn));
+    function mentionListen(current, node, name, fn, capture = false) {
+      node.addEventListener(name, fn, capture); current.listeners.push(() => node.removeEventListener(name, fn, capture));
     }
     function placeMentions(current) {
       if (state.disposed || activeMention !== current || !current.input.getBoundingClientRect) return;
       const input = current.input.getBoundingClientRect(); const wrap = current.wrap.getBoundingClientRect();
       const panel = current.panel.getBoundingClientRect(); const viewport = window.innerHeight;
-      const above = viewport - input.bottom < panel.height + 8 && input.top > viewport - input.bottom;
-      current.panel.style.top = `${above ? input.top - wrap.top - panel.height - 4 : input.bottom - wrap.top + 4}px`;
+      const height = current.targetHeight ?? panel.height;
+      const above = viewport - input.bottom < height + 8 && input.top > viewport - input.bottom;
+      const desiredTop = above ? input.top - height - 4 : input.bottom + 4;
+      const top = Math.max(12, Math.min(desiredTop, viewport - height - 12));
+      const left = Math.max(12, Math.min(input.left, window.innerWidth - panel.width - 12));
+      current.panel.style.top = `${top - wrap.top}px`;
+      current.panel.style.left = `${left - wrap.left}px`;
       current.panel.classList.toggle('is-above', above);
-      const active = current.picker.querySelector(`[id="${current.listId}-${current.active}"]`);
-      active?.scrollIntoView({ block: 'nearest' });
     }
     function renderSharedPicker(current) {
       current.renderer.update({
@@ -500,6 +505,37 @@ function createTimelineRenderer(container) {
         onTabChange: (source) => {
           if (activeMention !== current || current.source === source) return;
           mentionSource = current.source = source; queryMentions(current, false);
+        },
+        search: {
+          expanded: current.searchExpanded, value: current.query, label: t('mentionSearch'), placeholder: t('mentionSearch'),
+          listId: current.listId, activeDescendant: current.items[current.active] ? `${current.listId}-${current.active}` : undefined,
+          onExpandedChange: (expanded) => {
+            if (activeMention !== current || current.searchExpanded === expanded) return;
+            current.searchExpanded = expanded;
+            if (!expanded) {
+              current.composing = false;
+              const changed = current.query !== current.inlineQuery || current.requestedQuery !== current.inlineQuery;
+              current.query = current.inlineQuery;
+              if (changed) { queryMentions(current, false); return; }
+            }
+            highlightMentions(current);
+          },
+          onChange: (value) => {
+            if (activeMention !== current || !current.searchExpanded) return;
+            const query = value.slice(0, 80);
+            if (current.query === query) return;
+            current.query = query; renderSharedPicker(current);
+            // 先合并同一事件中的清空/收起，避免关闭搜索再发起一次无用查询。
+            void Promise.resolve().then(() => {
+              if (activeMention === current && current.searchExpanded && !current.composing && current.query === query) queryMentions(current, false);
+            });
+          },
+          onKeyDown: (event) => mentionKeydown(current, event),
+          onCollapse: () => { if (activeMention === current) current.input.focus({ preventScroll: true }); },
+        },
+        onHeightChange: (height, animated) => {
+          if (activeMention !== current) return;
+          current.targetHeight = height; current.panel.classList.toggle('is-resizing', animated); placeMentions(current);
         },
         items: current.items.map((item, index) => ({
           key: item.id, label: item.label, domId: `${current.listId}-${index}`,
@@ -511,21 +547,21 @@ function createTimelineRenderer(container) {
         activeKey: current.items[current.active]?.id,
         onItemHover: (id) => { const index = current.items.findIndex((item) => item.id === id); if (index >= 0) { current.active = index; highlightMentions(current); } },
         listId: current.listId, ariaLabel: t('mention'), emptyText: current.loading ? t('mentionLoading') : t('mentionEmpty'),
+        footer: current.error || current.hasMore ? createElement('div', { className: 'ui-stack ui-stack--tight' },
+          current.error ? createElement('span', { role: 'alert', className: 'ui-hint' }, current.error) : null,
+          current.hasMore ? createElement('button', { type: 'button', className: 'ui-btn ui-btn--ghost ui-btn--sm',
+            disabled: current.loading, 'data-mention-more': '', onMouseDown: (event) => event.preventDefault(),
+            onClick: () => { if (!current.loading && current.hasMore) queryMentions(current, true); } }, t('mentionMore')) : null) : undefined,
       });
     }
     function highlightMentions(current) {
-      for (const input of [current.input, current.search]) {
-        if (current.items[current.active]) input.setAttribute('aria-activedescendant', `${current.listId}-${current.active}`);
-        else input.removeAttribute('aria-activedescendant');
-      }
+      if (current.items[current.active]) current.input.setAttribute('aria-activedescendant', `${current.listId}-${current.active}`);
+      else current.input.removeAttribute('aria-activedescendant');
       renderSharedPicker(current);
     }
     function paintMentions(current) {
       if (state.disposed || activeMention !== current) return;
-      current.status.textContent = current.error || (current.loading && current.items.length ? t('mentionLoading') : '');
-      current.status.setAttribute('role', current.error ? 'alert' : 'status'); current.status.hidden = !current.status.textContent;
       current.panel.setAttribute('aria-busy', String(current.loading));
-      current.more.hidden = !current.hasMore; current.more.disabled = current.loading;
       highlightMentions(current);
     }
     function insertMention(current, item) {
@@ -543,7 +579,7 @@ function createTimelineRenderer(container) {
       mentionInFlight = true;
       try {
         const result = await props.runEffect({ type: 'prompt.mentions', source: task.source, query: task.query, offset: task.offset, preview: true });
-        if (state.disposed || activeMention !== current || task.sequence !== current.sequence) return;
+        if (state.disposed || activeMention !== current || task.sequence !== current.sequence || task.query !== current.query) return;
         if (!result?.ok) throw new Error(result?.error || 'mentionError');
         const items = mentionItems(result.value, task.offset);
         const merged = task.offset ? [...current.items, ...items] : items;
@@ -551,7 +587,7 @@ function createTimelineRenderer(container) {
         current.hasMore = result.value.hasMore; current.nextOffset = result.value.nextOffset; current.loading = false; current.error = '';
         current.active = Math.min(current.active, Math.max(0, current.items.length - 1)); paintMentions(current);
       } catch (error) {
-        if (!state.disposed && activeMention === current && task.sequence === current.sequence) {
+        if (!state.disposed && activeMention === current && task.sequence === current.sequence && task.query === current.query) {
           const message = error instanceof Error ? error.message : String(error);
           current.error = `${t(message === 'mentionInvalid' ? 'mentionInvalid' : 'mentionError')}${message !== 'mentionInvalid' && message !== 'mentionError' ? ` ${message.slice(0, 200)}` : ''}`;
           current.loading = false; paintMentions(current);
@@ -560,6 +596,7 @@ function createTimelineRenderer(container) {
     }
     function queryMentions(current, append) {
       if (activeMention !== current || state.disposed) return;
+      current.requestedQuery = current.query;
       current.sequence++; current.loading = true; current.error = '';
       if (!append) { current.items = []; current.active = 0; current.hasMore = false; }
       queuedMention = { current, sequence: current.sequence, source: current.source, query: current.query, offset: append ? current.nextOffset : 0 };
@@ -577,26 +614,22 @@ function createTimelineRenderer(container) {
     }
     function openMentions(input, wrap, change, limit, range) {
       closeMentions(false);
-      const panel = element('div', 'vr-stack vr-mentions'); panel.dataset.mentions = ''; panel.setAttribute('aria-label', t('mention'));
+      const panel = element('div', 'vr-mentions'); panel.dataset.mentions = ''; panel.setAttribute('aria-label', t('mention'));
       const current = { input, wrap, panel, change, limit, ...range, expectedValue: input.value, source: mentionSource, items: [], active: 0,
-        query: range.query || '', sequence: 0, hasMore: false, loading: false, error: '', listeners: [], listId: `vr-mentions-${++mentionCounter}` };
+        query: range.query || '', inlineQuery: range.query || '', searchExpanded: false,
+        sequence: 0, hasMore: false, loading: false, error: '', listeners: [], listId: `vr-mentions-${++mentionCounter}` };
       activeMention = current;
       current.picker = element('div'); current.picker.dataset.sharedMentionPicker = '';
       current.renderer = createMentionRenderer(current.picker, () => placeMentions(current));
-      current.search = element('input', 'ui-input'); current.search.type = 'search'; current.search.value = current.query;
-      current.search.placeholder = t('mentionSearch'); current.search.setAttribute('aria-label', t('mentionSearch')); current.search.dataset.mentionSearch = '';
-      const updateSearch = () => { const query = current.search.value.slice(0, 80); if (query === current.query) return; current.query = query; queryMentions(current, false); };
-      mentionListen(current, current.search, 'input', (event) => { if (!current.composing && !event.isComposing) updateSearch(); });
-      mentionListen(current, current.search, 'compositionstart', () => { current.composing = true; });
-      mentionListen(current, current.search, 'compositionend', () => { current.composing = false; updateSearch(); });
-      mentionListen(current, current.search, 'keydown', (event) => mentionKeydown(current, event));
-      current.status = element('p', 'ui-text-muted');
-      for (const control of [input, current.search]) { control.setAttribute('aria-controls', current.listId); control.setAttribute('aria-expanded', 'true'); }
+      mentionListen(current, panel, 'compositionstart', () => { if (current.searchExpanded) current.composing = true; });
+      mentionListen(current, panel, 'compositionend', (event) => {
+        if (!current.searchExpanded || typeof event.target.value !== 'string') return;
+        current.composing = false; current.query = event.target.value.slice(0, 80); queryMentions(current, false);
+      });
+      input.setAttribute('aria-controls', current.listId); input.setAttribute('aria-expanded', 'true');
       mentionListen(current, window, 'resize', () => placeMentions(current));
-      current.more = element('button', 'ui-btn', t('mentionMore')); current.more.type = 'button'; current.more.dataset.mentionMore = '';
-      mentionListen(current, current.more, 'click', () => { if (!current.loading && current.hasMore) queryMentions(current, true); });
-      const close = element('button', 'ui-btn', t('close')); close.type = 'button'; close.dataset.mentionClose = ''; mentionListen(current, close, 'click', () => closeMentions(true));
-      const actions = element('div', 'vr-row'); actions.append(current.more, close); panel.append(current.search, current.status, current.picker, actions); wrap.append(panel);
+      mentionListen(current, window, 'scroll', () => placeMentions(current), true);
+      panel.append(current.picker); wrap.append(panel);
       queryMentions(current, false);
     }
     function attachMentions(input, wrap, change, limit) {
@@ -607,7 +640,8 @@ function createTimelineRenderer(container) {
         if (!range) { if (activeMention?.input === input) closeMentions(false); return; }
         if (activeMention?.input !== input) { openMentions(input, wrap, change, limit, range); return; }
         const current = activeMention; current.start = range.start; current.end = range.end; current.expectedValue = input.value;
-        if (current.query !== range.query) { current.query = range.query; current.search.value = range.query; queryMentions(current, false); }
+        current.inlineQuery = range.query;
+        if (!current.searchExpanded && current.query !== range.query) { current.query = range.query; queryMentions(current, false); }
       };
       listen(input, 'compositionstart', () => { composing = true; if (activeMention?.input === input) closeMentions(false); });
       listen(input, 'compositionend', () => { composing = false; sync(); });

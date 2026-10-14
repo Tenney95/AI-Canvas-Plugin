@@ -12,7 +12,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 class Element {
   constructor(tag, doc) {
     this.tagName = tag; this.ownerDocument = doc; this.children = []; this.dataset = {};
-    this.attributes = {}; this.listeners = new Map(); this.textContent = ''; this.className = '';
+    this.attributes = {}; this.listeners = new Map(); this.textContent = ''; this.className = ''; this.style = {};
     this.scrollTop = 0;
     this.classList = { toggle: (name, enabled) => { const classes = new Set(this.className.split(' ')); if (enabled) classes.add(name); else classes.delete(name); this.className = [...classes].join(' '); } };
   }
@@ -52,6 +52,25 @@ function mockMentionRenderer(container, onCommit) {
         button.setAttribute('role', 'tab'); button.setAttribute('aria-selected', String(options.activeTab === tab.id));
         button.addEventListener('mousedown', (event) => { event.preventDefault(); options.onTabChange(tab.id); }); tabs.append(button);
       }
+      if (options.search) {
+        const toggle = doc.createElement('button'); toggle.dataset.mentionSearchToggle = '';
+        toggle.addEventListener('click', () => {
+          if (options.search.expanded) { options.search.onChange(''); options.search.onExpandedChange(false); options.search.onCollapse?.(); }
+          else options.search.onExpandedChange(true);
+        }); tabs.append(toggle);
+        if (options.search.expanded) {
+          const input = doc.createElement('input'); input.dataset.mentionSearch = ''; input.value = options.search.value;
+          input.addEventListener('input', () => options.search.onChange(input.value));
+          input.addEventListener('compositionstart', () => container.parentElement.dispatch('compositionstart', { target: input }));
+          input.addEventListener('compositionend', () => container.parentElement.dispatch('compositionend', { target: input }));
+          input.addEventListener('keydown', (event) => {
+            if (event.isComposing) return;
+            if (event.key === 'Escape') {
+              event.preventDefault(); options.search.onChange(''); options.search.onExpandedChange(false); options.search.onCollapse?.();
+            } else options.search.onKeyDown?.(event);
+          }); tabs.append(input);
+        }
+      }
       const list = doc.createElement('div'); list.id = options.listId; list.setAttribute('role', 'listbox');
       if (!options.items.length) list.textContent = options.emptyText;
       for (const item of options.items) {
@@ -62,7 +81,7 @@ function mockMentionRenderer(container, onCommit) {
         if (item.thumbnailUrl) { const image = doc.createElement('img'); image.src = item.thumbnailUrl; button.append(image); }
         list.append(button);
       }
-      container.append(tabs, list); onCommit();
+      container.append(tabs, list); if (options.footer) container.append(options.footer); onCommit();
     },
     dispose() { this.disposals++; container.replaceChildren(); },
   };
@@ -141,6 +160,19 @@ function runtime() {
     removeEventListener(name, fn) { events.get(name)?.delete(fn); },
   };
   const context = createContext({ window, Blob, Uint8Array, atob, createReferenceEditor: mockReferenceEditor,
+    createElement: (tag, properties, ...children) => {
+      const node = doc.createElement(tag);
+      for (const [name, value] of Object.entries(properties || {})) {
+        if (name.startsWith('on')) node.addEventListener(name.slice(2).toLowerCase(), value);
+        else if (name.startsWith('data-')) node.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
+        else if (name === 'className' || name === 'disabled') node[name] = value;
+        else node.setAttribute(name, value);
+      }
+      for (const child of children.flat().filter((item) => item != null)) {
+        if (typeof child === 'object') node.append(child); else node.textContent += String(child);
+      }
+      return node;
+    },
     setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearTimeout: (id) => timers.delete(id), URL: {
     createObjectURL: (blob) => { blobs.push(blob); return 'blob:test-preview'; }, revokeObjectURL: (url) => revoked.push(url),
@@ -149,7 +181,7 @@ function runtime() {
   const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedUiKitCss = ''; const sharedPickerCss = ''; const createTimelineRenderer = ${mockTimelineRenderer.toString()}; const createSelectRenderer = ${createSelectRenderer.toString()}; const createModelPickerRenderer = ${mockModelPickerRenderer.toString()}; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
   new Script(executable.replace('const bridge = window.__AI_CANVAS_PLUGIN_HOST__;',
     'globalThis.helpers = { validateShots, planSamples, parseModelResponse, nodeCount, buildPrompt, generationParameters, mentionRange, mentionItems, segmentLimit, planSegments }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
-  return { helpers: context.helpers, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, modelRenderers: doc.modelRenderers, timelineRenderers: doc.timelineRenderers, timers,
+  return { helpers: context.helpers, window, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, modelRenderers: doc.modelRenderers, timelineRenderers: doc.timelineRenderers, timers,
     fireTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback(); } };
 }
 function props(overrides = {}) {
@@ -322,11 +354,50 @@ test('reference button replaces the saved selection, source/search/page requests
   input.value = '原有房间文字'; input.setSelectionRange(2, 4); input.dispatch('input');
   find(ui.root, (item) => item.dataset.mentionOpen === 'scene').dispatch('click'); await flush();
   find(ui.root, (item) => item.dataset.source === 'characters').dispatch('mousedown'); await flush();
+  find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearchToggle')).dispatch('click');
   const search = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearch')); search.value = '夜景'; search.dispatch('input'); await flush();
   find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionMore')).dispatch('click'); await flush();
   assert.deepEqual(clone(requests.at(-1)), { type: 'prompt.mentions', source: 'characters', query: '夜景', offset: 20, preview: true });
   const picker = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentions')); const list = find(picker, (item) => item.attributes.role === 'listbox'); assert.equal(list.children.length, 3);
   find(picker, (item) => item.dataset.mentionId === 'ref-3').dispatch('mousedown'); assert.equal(input.value, `原有${reference(3).token} 文字`); cleanup();
+});
+
+test('shared expandable search restores inline candidates after one collapse without changing the draft', async () => {
+  const ui = runtime(); const requests = []; const options = props(); const run = options.runEffect;
+  options.runEffect = (request) => {
+    if (request.type !== 'prompt.mentions') return run(request);
+    requests.push(request); return Promise.resolve(mentionResponse([reference(1, request.query || '原候选')]));
+  };
+  const cleanup = ui.mount(ui.root, options); await flush();
+  const input = find(ui.root, (item) => item.dataset.field === 'character'); typeAt(input, '角色要求 @'); await flush();
+  assert.equal(find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearch')), undefined);
+  find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearchToggle')).dispatch('click');
+  const search = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearch'));
+  search.value = '夜景'; search.dispatch('input'); await flush();
+  assert.equal(requests.at(-1).query, '夜景');
+  find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearchToggle')).dispatch('click'); await flush();
+  assert.equal(find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearch')), undefined);
+  assert.equal(requests.at(-1).query, ''); assert.equal(requests.length, 3);
+  assert.equal(input.value, '角色要求 @'); assert.equal(ui.root.ownerDocument.activeElement, input);
+  assert.match(texts(ui.root), /原候选/); cleanup();
+});
+
+test('mention placement uses target height and never scrolls the surrounding page', async () => {
+  const ui = runtime(); const options = props(); const run = options.runEffect;
+  options.runEffect = (request) => request.type === 'prompt.mentions' ? Promise.resolve(mentionResponse()) : run(request);
+  const cleanup = ui.mount(ui.root, options); await flush();
+  const input = find(ui.root, (item) => item.dataset.field === 'character'); typeAt(input, '@'); await flush();
+  const panel = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentions'));
+  input.getBoundingClientRect = () => ({ left: 300, top: 500, bottom: 560 });
+  panel.parentElement.getBoundingClientRect = () => ({ left: 288, top: 480 });
+  panel.getBoundingClientRect = () => ({ width: 336, height: 400 });
+  ui.window.innerHeight = 600; ui.window.innerWidth = 800;
+  const renderer = ui.renderers.find((item) => !item.disposals);
+  renderer.props.onHeightChange(200, true);
+  assert.equal(panel.style.top, '-184px'); assert.equal(panel.style.left, '12px');
+  assert.match(panel.className, /is-resizing/);
+  renderer.props.onHeightChange(200, false); assert.doesNotMatch(panel.className, /is-resizing/);
+  cleanup(); assert.ok([...ui.events.values()].every((listeners) => listeners.size === 0));
 });
 
 test('mentions in replacement requirements and shot prompts remain opaque through analysis/submission', async () => {
@@ -365,6 +436,7 @@ test('IME input does not query until committed and Escape preserves text', async
   const cleanup = ui.mount(ui.root, options); await flush(); const input = find(ui.root, (item) => item.dataset.field === 'character');
   input.dispatch('compositionstart'); input.value = '@新'; input.setSelectionRange(2, 2); input.dispatch('input', { isComposing: true }); await flush(); assert.equal(calls, 0);
   input.dispatch('compositionend'); await flush(); assert.equal(calls, 1); input.dispatch('keydown', { key: 'Enter', isComposing: true }); assert.equal(input.value, '@新');
+  find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearchToggle')).dispatch('click');
   const search = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearch')); search.dispatch('compositionstart'); search.value = '夜景'; search.dispatch('input', { isComposing: true }); await flush(); assert.equal(calls, 1);
   search.dispatch('compositionend'); search.dispatch('input'); await flush(); assert.equal(calls, 2);
   input.dispatch('keydown', { key: 'Escape' }); assert.equal(input.value, '@新'); assert.equal(find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentions')), undefined); cleanup();
@@ -377,7 +449,8 @@ test('mention queries serialize latest search and ignore stale responses and pos
   typeAt(input, '@'); typeAt(input, '@旧'); typeAt(input, '@最新'); assert.equal(requests.length, 1);
   pending.shift()(mentionResponse([reference(1, '过期候选')])); await flush(); assert.equal(requests.length, 2); assert.equal(requests[1].query, '最新'); assert.doesNotMatch(texts(ui.root), /过期候选/);
   pending.shift()(mentionResponse([reference(2, '当前候选')])); await flush(); assert.match(texts(ui.root), /当前候选/);
-  const search = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearch')); search.value = '关闭后'; search.dispatch('input'); cleanup(); pending.shift()(mentionResponse()); await flush();
+  find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearchToggle')).dispatch('click');
+  const search = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentionSearch')); search.value = '关闭后'; search.dispatch('input'); await flush(); cleanup(); pending.shift()(mentionResponse()); await flush();
   assert.equal(ui.root.children.length, 0); assert.ok([...ui.events.values()].every((listeners) => listeners.size === 0));
 });
 
