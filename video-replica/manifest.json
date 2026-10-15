@@ -1,6 +1,6 @@
 {
   "apiVersion": 2,
-  "minHostVersion": "0.10.2",
+  "minHostVersion": "0.10.7",
   "requiredCapabilities": [
     "python.executionTimeout",
     "python.mediaWorkspace",
@@ -8,12 +8,13 @@
     "tool.effectBudgets",
     "video.nodeSetGeneration",
     "prompt.mentions",
-    "video.replicaPipeline"
+    "video.replicaPipeline",
+    "video.playbackPreview"
   ],
   "runtime": "python",
   "id": "com.aicanvas.video-replica",
   "name": "视频复刻",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "AI Canvas",
   "repository": "https://github.com/Tenney95/AI-Canvas-Plugin",
   "description": "一键复刻完整视频，可按模型能力自动分段或手动打点，提取音频对白、制作 ReShot 控制素材，通过已配置视频模型或 ComfyUI 生成并合成。",
@@ -39,7 +40,7 @@
   ],
   "ui": {
     "entry": "ui.js",
-    "integrity": "sha256-85b6a6663bb83559b77cb19b9015e7edbcec9f85ed4b16a5248b325a86ea7e7c",
+    "integrity": "sha256-1780e9a56c3440e87668fbee9d069d9f84bc4d2a0894f80998a8111618cd5f2e",
     "exports": {
       "replica": "VideoReplica"
     }
@@ -53,7 +54,7 @@
           "mediaWorkspace": true
         },
         "title": "视频复刻",
-        "description": "切镜、逐镜提示词与动作控制素材",
+        "description": "自动分段、准备控制素材并生成完整复刻视频",
         "placements": [
           "node-context-menu",
           "node-toolbar"
@@ -74,8 +75,8 @@
         },
         "dialog": {
           "title": "视频复刻",
-          "description": "选择模型后一键复刻全片，也可手动打点或进入高级镜头编辑。",
-          "submitLabel": "生成复刻素材",
+          "description": "选择模型后一键复刻全片，也可在时间轴手动打点。",
+          "submitLabel": "一键复刻",
           "fields": [],
           "ui": "replica",
           "presentation": "window"

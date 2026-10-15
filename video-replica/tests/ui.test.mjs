@@ -5,9 +5,63 @@ import { Script, createContext } from 'node:vm';
 
 const source = await readFile(new URL('../src/ui.js', import.meta.url), 'utf8');
 const sample = 'data:image/jpeg;base64,AA==';
-const shot = (key, inPoint, outPoint) => ({ key, inPoint, outPoint, description: '', prompt: '' });
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test('removed advanced drafts reopen into one-click replication without manual actions', async () => {
+  const ui = runtime(); const cleanup = ui.mount(ui.root, props()); await flush();
+  for (const action of ['toggle-advanced', 'detect', 'analyze', 'extract', 'submit']) {
+    assert.equal(find(ui.root, (node) => node.dataset.action === action), undefined);
+  }
+  assert.ok(find(ui.root, (node) => node.dataset.action === 'quick-start'));
+  assert.ok(find(ui.root, (node) => node.dataset.field === 'cut-time'));
+  assert.doesNotMatch(texts(ui.root), /高级：手动镜头|镜头编辑/); cleanup();
+});
+
+test('large files prepare one MP4 and native video time drives the timeline', async () => {
+  const ui = runtime(); const options = props(); const regular = options.runEffect; const requests = [];
+  options.resources.self[0].size = 20 * 1024 * 1024;
+  options.runEffect = async (request) => {
+    requests.push(clone(request));
+    if (request.type === 'video.preparePlayback') return { ok: true, value: {
+      resource: { resourceId: 'bounded-preview', mediaType: 'video/mp4', size: 20 * 1024 * 1024 }, hasAudio: false, duration: 12,
+    } };
+    if (request.type === 'video.readPlayback') {
+      const base64Chunks = [];
+      for (let start = 0; start < request.length; start += 180 * 1024) base64Chunks.push(Buffer.alloc(Math.min(180 * 1024, request.length - start)).toString('base64'));
+      return { ok: true, value: { offset: request.offset, bytes: request.length, base64Chunks } };
+    }
+    return regular(request);
+  };
+  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'play');
+  assert.equal(requests.filter((item) => item.type === 'video.preparePlayback').length, 1);
+  assert.equal(requests.find((item) => item.type === 'video.readPlayback').resourceId, 'bounded-preview');
+  assert.equal(ui.blobs[0].size, 20 * 1024 * 1024);
+  assert.ok(requests.filter((item) => item.type === 'video.readPlayback').length < 20);
+  const player = find(ui.root, (node) => node.tagName === 'video'); assert.ok(player);
+  player.paused = false; player.ended = false; player.currentTime = 3.2; player.dispatch('play');
+  ui.fireFrame(9000);
+  assert.equal(ui.timelineRenderers.at(-1).options.playhead, 3.2);
+  player.currentTime = 3.24; ui.fireFrame(12000);
+  assert.equal(ui.timelineRenderers.at(-1).options.playhead, 3.24);
+  ui.timelineRenderers.at(-1).options.onSeek(8); assert.equal(player.currentTime, 8);
+  player.paused = true; player.dispatch('pause'); assert.equal(ui.frames.size, 0);
+  assert.match(texts(ui.root), /视频预览 · 无音频/);
+  cleanup(); assert.equal(ui.frames.size, 0); assert.deepEqual(ui.revoked, ['blob:test-preview']);
+});
+
+test('failed or late large-file preparation never starts a slideshow or creates a blob', async () => {
+  for (const late of [false, true]) {
+    const ui = runtime(); const options = props(); const regular = options.runEffect; let resolve;
+    options.resources.self[0].size = 20 * 1024 * 1024;
+    options.runEffect = (request) => request.type === 'video.preparePlayback'
+      ? late ? new Promise((done) => { resolve = done; }) : Promise.resolve({ ok: false, error: 'codec' }) : regular(request);
+    const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'play');
+    if (late) { cleanup(); resolve({ ok: true, value: { resource: { resourceId: 'preview', size: 1, mediaType: 'video/mp4' } } }); await flush(); }
+    else { assert.match(texts(ui.root), /播放预览读取失败/); cleanup(); }
+    assert.equal(ui.blobs.length, 0); assert.equal(ui.frames.size, 0);
+  }
+});
 
 class Element {
   constructor(tag, doc) {
@@ -91,7 +145,7 @@ function createSelectRenderer(container, options) {
   const doc = container.ownerDocument;
   const select = doc.createElement('select'); select.dataset.field = options.name;
   select.value = options.value; select.disabled = options.disabled;
-  for (const option of options.options) { const node = doc.createElement('option'); node.value = option.value; node.textContent = option.label; select.append(node); }
+  for (const option of options.options) { const node = doc.createElement('option'); node.value = option.value; node.textContent = option.label; node.disabled = Boolean(option.disabled); select.append(node); }
   select.addEventListener('change', () => { if (!select.disabled) options.onChange(select.value); });
   container.append(select);
   const renderer = { options, disposals: 0, dispose() { this.disposals++; container.replaceChildren(); } };
@@ -152,7 +206,9 @@ function mockReferenceEditor(doc, options) {
 function runtime() {
   const events = new Map(); const revoked = []; const blobs = [];
   const timers = new Map(); let nextTimer = 0;
-  const doc = { referenceEditors: [], timelineRenderers: [], selectRenderers: [], modelRenderers: [], renderers: [], createElement: (tag) => new Element(tag, doc) };
+  const frames = new Map(); let nextFrame = 0;
+  const doc = { referenceEditors: [], timelineRenderers: [], selectRenderers: [], modelRenderers: [], renderers: [],
+    createElement: (tag) => new Element(tag, doc), createElementNS: (_namespace, tag) => new Element(tag, doc) };
   doc.documentElement = new Element('html', doc);
   const window = {
     __AI_CANVAS_PLUGIN_HOST__: { exports: {} },
@@ -174,14 +230,17 @@ function runtime() {
       return node;
     },
     setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
+    requestAnimationFrame: (callback) => { const id = ++nextFrame; frames.set(id, callback); return id; },
+    cancelAnimationFrame: (id) => frames.delete(id),
     clearTimeout: (id) => timers.delete(id), URL: {
     createObjectURL: (blob) => { blobs.push(blob); return 'blob:test-preview'; }, revokeObjectURL: (url) => revoked.push(url),
   } });
   // Test-only injection: production bundle exports only its mount function.
   const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/\/\* shared-renderer:start \*\/[\s\S]*?\/\* shared-renderer:end \*\//, `const sharedBaseCss = ''; const sharedUiKitCss = ''; const sharedPickerCss = ''; const createTimelineRenderer = ${mockTimelineRenderer.toString()}; const createSelectRenderer = ${createSelectRenderer.toString()}; const createModelPickerRenderer = ${mockModelPickerRenderer.toString()}; const createMentionRenderer = ${mockMentionRenderer.toString()};`);
   new Script(executable.replace('const bridge = window.__AI_CANVAS_PLUGIN_HOST__;',
-    'globalThis.helpers = { validateShots, planSamples, parseModelResponse, nodeCount, buildPrompt, generationParameters, mentionRange, mentionItems, segmentLimit, planSegments }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
+    'globalThis.helpers = { mentionRange, mentionItems, segmentLimit, planSegments }; const bridge = window.__AI_CANVAS_PLUGIN_HOST__;')).runInContext(context);
   return { helpers: context.helpers, window, root: new Element('root', doc), mount: window.__AI_CANVAS_PLUGIN_HOST__.exports.VideoReplica, events, revoked, blobs, renderers: doc.renderers, selectRenderers: doc.selectRenderers, modelRenderers: doc.modelRenderers, timelineRenderers: doc.timelineRenderers, timers,
+    frames, fireFrame(timestamp) { const [id, callback] = frames.entries().next().value; frames.delete(id); callback(timestamp); },
     fireTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback(); } };
 }
 function props(overrides = {}) {
@@ -225,102 +284,17 @@ const reference = (i = 1, label = `角色${i}`) => ({ id: `ref-${i}`, label, kin
 const mentionResponse = (items = [reference()], extra = {}) => ({ ok: true, value: { items, hasMore: false, nextOffset: null, ...extra } });
 function typeAt(node, value) { node.value = value; node.setSelectionRange(value.length, value.length); node.dispatch('input'); }
 
-test('boundaries reject overlap, out-of-video, >15-second or >6-shot input', () => {
-  const { helpers } = runtime();
-  assert.deepEqual(clone(helpers.validateShots([shot('b', 3, 6), shot('a', 0, 3)], 10)).map((item) => item.key), ['a', 'b']);
-  for (const shots of [[shot('a', 0, 16)], [shot('a', 0, 4), shot('b', 3, 6)], [shot('a', -1, 2)], [shot('a', 9, 11)],
-    [shot('a', 0, 1), shot('a', 1, 2)], Array.from({ length: 7 }, (_, i) => shot(`s${i}`, i, i + 1))]) assert.throws(() => helpers.validateShots(shots, 10), /bounds/);
-});
-test('samples use 1–3 frames per shot and remain ordered, unique and inside intervals', () => {
-  const { helpers } = runtime(); const shots = [shot('a', 0, .08), shot('b', .08, .3), shot('c', .3, 3)];
-  const samples = clone(helpers.planSamples(shots)); assert.equal(samples.length, 6);
-  assert.ok(samples.every((item, i) => i === 0 || item.time > samples[i - 1].time));
-  assert.ok(samples.every((item) => { const own = shots.find((record) => item.key.startsWith(`${record.key}_f`)); return item.time > own.inPoint && item.time < own.outPoint; }));
-});
-test('structured model response rejects wrong keys/times, missing shots and oversize fields', () => {
-  const { helpers } = runtime(); const shots = [shot('a', 1, 3)]; const valid = { ...shots[0], description: '<img onerror=alert(1)>', prompt: 'close-up', camera: 'pan' };
-  assert.equal(helpers.parseModelResponse(`\`\`\`json\n${JSON.stringify({ shots: [valid] })}\n\`\`\``, shots)[0].description, valid.description);
-  for (const value of [{ shots: [] }, { shots: [{ ...valid, key: 'b' }] }, { shots: [{ ...valid, inPoint: 2 }] },
-    { shots: [{ ...valid, prompt: '' }] }, { shots: [{ ...valid, description: 'x'.repeat(4001) }] }]) assert.throws(() => helpers.parseModelResponse(JSON.stringify(value), shots), /responseError/);
-});
-test('analysis prompt includes chronological actual times and explicit JSON schema', () => {
-  const { helpers } = runtime(); const prompt = helpers.buildPrompt([shot('a', 0, 3)], [{ key: 'a_f1', requestedTime: .5, actualTime: .48 }], { character: 'new actor' }, 'zh-CN');
-  assert.match(prompt, /"actualTime":0.48/); assert.match(prompt, /Example schema/); assert.match(prompt, /Simplified Chinese/); assert.match(prompt, /unknown without audio/);
-});
-test('node budget counts reference images and every per-shot control', () => {
-  const { helpers } = runtime(); const shots = Array.from({ length: 6 }, (_, i) => ({ ...shot(`s${i}`, i, i + 1), frameResourceId: `f${i}` }));
-  assert.equal(helpers.nodeCount(shots, ['depth', 'pose', 'canny']), 26); assert.equal(helpers.nodeCount(shots, ['depth']), 14);
-  assert.equal(helpers.nodeCount(shots, ['depth', 'pose'], 'model'), 26); assert.equal(helpers.nodeCount(shots, ['depth'], 'comfyui'), 20);
-});
-test('generation configuration accepts only configured video identities for the chosen backend', () => {
-  const { helpers } = runtime(); const models = props().models; const options = { aspectRatio: '16:9', resolution: '720p', generateAudio: false };
-  assert.deepEqual(clone(helpers.generationParameters('materials', '', models, options)), { backend: 'materials' });
-  assert.deepEqual(clone(helpers.generationParameters('model', 'general/video-model', models, options)), {
-    backend: 'model', modelId: 'general/video-model', parameters: { aspectRatio: '16:9', resolution: '720p', generateAudio: false },
-  });
-  for (const [backend, id] of [['model', 'vision'], ['model', 'unknown'], ['model', 'comfyui/video-workflow'], ['comfyui', 'general/video-model'], ['unknown', 'general/video-model']])
-    assert.throws(() => helpers.generationParameters(backend, id, models, options), /generationRequired/);
-  assert.throws(() => helpers.generationParameters('model', 'general/video-model', models, { ...options, resolution: 'invalid' }), /generationInvalid/);
-});
 test('missing local resource fails before any effect and unsupported locale falls back explicitly', () => {
   const ui = runtime(); let effects = 0; const cleanup = ui.mount(ui.root, props({ locale: 'ja-JP', resources: { self: [] }, runEffect: async () => { effects++; } }));
   assert.match(texts(ui.root), /Download and import/); assert.match(texts(ui.root), /uses English/); assert.equal(effects, 0); cleanup();
   assert.ok([...ui.events.values()].every((listeners) => listeners.size === 0));
 });
-test('detect → analyze → submit preserves human text and sends matching frame handles', async () => {
-  const ui = runtime(); let submitted; const options = props({ submit: async (value) => { submitted = value; } });
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect');
-  edit(ui.root, 'description', '<script>human edit</script>'); edit(ui.root, 'prompt', 'human generation prompt');
-  const model = find(ui.root, (item) => item.dataset.field === 'model'); model.value = 'vision'; model.dispatch('change');
-  await click(ui.root, 'analyze'); assert.doesNotMatch(texts(ui.root), /操作失败/);
-  await click(ui.root, 'submit'); assert.equal(submitted.operation, 'replicate'); assert.deepEqual(clone(submitted.controls), ['depth']);
-  assert.deepEqual(clone(submitted.generation), { backend: 'materials' });
-  assert.equal(submitted.shots[0].description, '<script>human edit</script>'); assert.equal(submitted.shots[0].prompt, 'human generation prompt');
-  assert.equal(submitted.shots[1].prompt, 'model prompt'); assert.equal(submitted.shots[0].frameKey, `image_${submitted.shots[0].key}`);
-  assert.match(submitted.shots[0].frameResourceId, /^resource-/); cleanup();
-});
 test('both effect ok:false and Promise rejection render a recoverable error', async () => {
   for (const runEffect of [async () => ({ ok: false, error: 'decoder failed' }), async () => { throw new Error('session expired'); }]) {
     const ui = runtime(); const cleanup = ui.mount(ui.root, props({ runEffect })); await flush();
-    assert.match(texts(ui.root), /操作失败/); assert.equal(find(ui.root, (item) => item.dataset.action === 'detect').disabled, false); cleanup();
+    assert.match(texts(ui.root), /操作失败/); assert.equal(find(ui.root, (item) => item.dataset.action === 'close').disabled, false); cleanup();
   }
 });
-test('local keyframes and manual prompts submit without a model call', async () => {
-  const ui = runtime(); const effects = []; let submitted;
-  const options = props(); const run = options.runEffect;
-  options.runEffect = async (value) => { effects.push(value.type); return run(value); };
-  options.submit = async (value) => { submitted = value; };
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect'); await click(ui.root, 'extract');
-  const promptFields = [];
-  function collect(node) { for (const child of node.children) { if (child.dataset.field === 'prompt') promptFields.push(child); collect(child); } }
-  collect(ui.root); for (const field of promptFields) { field.value = 'manual prompt'; field.dispatch('input'); }
-  await click(ui.root, 'submit'); assert.ok(submitted.shots.every((record) => record.frameResourceId)); assert.ok(!effects.includes('model.generate')); cleanup();
-});
-
-test('keyframe feedback beside actions explains missing shots and restores button focus', async () => {
-  const ui = runtime(); const effects = []; const options = props(); const run = options.runEffect;
-  options.runEffect = async (request) => { effects.push(request); return run(request); };
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'extract');
-  const feedback = find(ui.root, (item) => Object.hasOwn(item.dataset, 'feedback'));
-  assert.match(feedback.textContent, /请先点击“检测镜头”或“添加镜头”/); assert.equal(feedback.attributes.role, 'alert');
-  assert.equal(feedback.attributes['aria-live'], 'assertive'); assert.equal(feedback.hidden, false);
-  const button = find(ui.root, (item) => item.dataset.action === 'extract');
-  assert.equal(ui.root.ownerDocument.activeElement, button); assert.equal(button.focusOptions.preventScroll, true);
-  assert.equal(effects.length, 1); await click(ui.root, 'detect');
-  for (const key of ['shot1', 'shot2']) { const checkbox = find(find(ui.root, (item) => item.dataset.shot === key), (item) => item.type === 'checkbox'); checkbox.checked = false; checkbox.dispatch('change'); }
-  await click(ui.root, 'extract'); assert.match(find(ui.root, (item) => Object.hasOwn(item.dataset, 'feedback')).textContent, /勾选至少一个镜头/); cleanup();
-});
-
-test('local keyframe feedback shows progress and completion without model calls', async () => {
-  const ui = runtime(); let complete; const options = props(); const run = options.runEffect;
-  options.runEffect = (request) => request.type === 'video.extractFrames' && request.mode === 'analysis'
-    ? new Promise((resolve) => { complete = () => resolve(run(request)); }) : run(request);
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect');
-  await click(ui.root, 'extract'); assert.match(find(ui.root, (item) => Object.hasOwn(item.dataset, 'feedback')).textContent, /本地提取逐镜关键帧/);
-  assert.equal(find(ui.root, (item) => item.dataset.action === 'extract').disabled, true); complete(); await flush(); await flush();
-  const feedback = find(ui.root, (item) => Object.hasOwn(item.dataset, 'feedback')); assert.match(feedback.textContent, /关键帧已提取/); assert.equal(feedback.attributes.role, 'status'); cleanup();
-});
-
 test('mention range and candidate validation reject canonical paths and invalid pages', () => {
   const { helpers } = runtime();
   assert.deepEqual(clone(helpers.mentionRange('替换成 @小红', 7, 7)), { start: 4, end: 7, query: '小红' });
@@ -400,19 +374,6 @@ test('mention placement uses target height and never scrolls the surrounding pag
   cleanup(); assert.ok([...ui.events.values()].every((listeners) => listeners.size === 0));
 });
 
-test('mentions in replacement requirements and shot prompts remain opaque through analysis/submission', async () => {
-  const ui = runtime(); let submitted; const requests = []; const options = props({ submit: async (value) => { submitted = value; } }); const run = options.runEffect;
-  options.runEffect = async (request) => { requests.push(request); return request.type === 'prompt.mentions' ? mentionResponse() : run(request); };
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect');
-  for (const field of ['character', 'scene', 'prompt']) {
-    const input = find(ui.root, (item) => item.dataset.field === field); typeAt(input, '@'); await flush(); input.dispatch('keydown', { key: 'Enter' });
-  }
-  select(ui.root, 'model', 'vision'); await click(ui.root, 'analyze'); await click(ui.root, 'submit');
-  assert.equal(submitted.character, `${reference().token} `); assert.equal(submitted.scene, `${reference().token} `); assert.equal(submitted.shots[0].prompt, `${reference().token} `);
-  assert.ok(requests.find((request) => request.type === 'model.generate').prompt.includes(reference().token));
-  assert.doesNotMatch(JSON.stringify(submitted), /@asset|https?:|filePath|apiKey|D:\\/); cleanup();
-});
-
 test('reference capsules show safe thumbnails and badges and retain the serialized draft after theme repaint', async () => {
   const ui = runtime(); const options = props(); const run = options.runEffect;
   options.runEffect = (request) => request.type === 'prompt.mentions'
@@ -463,79 +424,33 @@ test('reference query failure and malformed tokens show nearby feedback without 
     const picker = find(ui.root, (item) => Object.hasOwn(item.dataset, 'mentions')); assert.match(texts(picker), /引用查询失败|无效引用/); assert.equal(input.value, '原文 @'); cleanup();
   }
 });
-test('reanalysis refreshes generated prompts but preserves manual edits and stops at four calls', async () => {
-  const ui = runtime(); let calls = 0;
-  const options = props(); const run = options.runEffect;
-  options.runEffect = async (request) => {
-    const reply = await run(request);
-    if (request.type === 'model.generate') { const result = JSON.parse(reply.value.text); calls++; for (const record of result.shots) record.prompt = `generated ${calls}`; reply.value.text = JSON.stringify(result); }
-    return reply;
-  };
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect'); edit(ui.root, 'prompt', 'human prompt');
-  const model = find(ui.root, (item) => item.dataset.field === 'model'); model.value = 'vision'; model.dispatch('change');
-  await click(ui.root, 'analyze'); await click(ui.root, 'analyze');
-  const cards = find(ui.root, (item) => item.dataset.shot === 'shot2');
-  assert.equal(find(cards, (item) => item.dataset.field === 'prompt').value, 'generated 2');
-  assert.equal(find(ui.root, (item) => item.dataset.field === 'prompt').value, 'human prompt');
-  await click(ui.root, 'analyze'); await click(ui.root, 'analyze'); await click(ui.root, 'analyze');
-  assert.equal(calls, 4); assert.match(texts(ui.root), /额度已用完/); cleanup();
-});
-test('video-model submission uses safe catalog id and counts background generation nodes', async () => {
-  const ui = runtime(); let submitted; const options = props({ submit: async (value) => { submitted = value; } });
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect'); await click(ui.root, 'extract');
-  select(ui.root, 'generation-backend', 'model');
-  const choices = find(ui.root, (item) => item.dataset.field === 'generation-model');
-  assert.deepEqual(choices.children.map((item) => item.value), ['', 'general/video-model']);
-  select(ui.root, 'generation-model', 'general/video-model'); select(ui.root, 'generation-ratio', '9:16'); select(ui.root, 'generation-resolution', '720p');
-  const promptFields = [];
-  function collect(node) { for (const child of node.children) { if (child.dataset.field === 'prompt') promptFields.push(child); collect(child); } }
-  collect(ui.root); for (const field of promptFields) { field.value = 'manual video prompt'; field.dispatch('input'); }
-  assert.match(texts(ui.root), /8\/25/); assert.match(texts(ui.root), /后台串行生成/);
-  await click(ui.root, 'submit'); assert.deepEqual(clone(submitted.generation), {
-    backend: 'model', modelId: 'general/video-model', parameters: { aspectRatio: '9:16', resolution: '720p', generateAudio: false },
-  }); cleanup();
-});
-test('ComfyUI mode lists only configured video workflows and never serializes service addresses', async () => {
-  const ui = runtime(); let submitted; const cleanup = ui.mount(ui.root, props({ submit: async (value) => { submitted = value; } }));
-  await flush(); await click(ui.root, 'detect'); select(ui.root, 'generation-backend', 'comfyui');
-  const choices = find(ui.root, (item) => item.dataset.field === 'generation-model'); assert.deepEqual(choices.children.map((item) => item.value), ['', 'comfyui/video-workflow']);
-  await click(ui.root, 'submit'); assert.equal(submitted, undefined); assert.match(texts(ui.root), /填写生成提示词/);
-  select(ui.root, 'generation-model', 'comfyui/video-workflow');
-  const cards = []; function collect(node) { for (const child of node.children) { if (child.dataset.field === 'prompt') cards.push(child); collect(child); } }
-  collect(ui.root); for (const field of cards) { field.value = 'workflow prompt'; field.dispatch('input'); }
-  await click(ui.root, 'submit'); assert.equal(submitted.generation.backend, 'comfyui'); assert.equal(submitted.generation.modelId, 'comfyui/video-workflow');
-  assert.doesNotMatch(JSON.stringify(submitted), /https?:|apiKey|baseUrl|workflowId|filePath/); cleanup();
-});
-test('generation exceeding 25 nodes rejects submission without dropping selected shots', async () => {
-  const ui = runtime(); let submitted = 0; const options = props({ submit: async () => { submitted++; } }); const run = options.runEffect;
-  options.runEffect = async (request) => request.type === 'video.detectShots' ? { ok: true, value: {
-    shots: Array.from({ length: 6 }, (_, i) => ({ inPoint: i * 2, outPoint: (i + 1) * 2 })),
-  } } : run(request);
-  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect'); await click(ui.root, 'extract');
-  const pose = find(ui.root, (item) => item.dataset.control === 'pose'); pose.checked = true; pose.dispatch('change');
-  select(ui.root, 'generation-backend', 'model'); select(ui.root, 'generation-model', 'general/video-model');
-  assert.match(texts(ui.root), /26\/25/); assert.equal(find(ui.root, (item) => Object.hasOwn(item.dataset, 'budgetWarning')).hidden, false);
-  await click(ui.root, 'submit'); assert.equal(submitted, 0); assert.match(texts(ui.root), /不会自动丢弃选中镜头/);
-  assert.match(texts(ui.root), /选中 6\/6/); cleanup();
-});
 test('cleanup blocks a late async result and removes theme/locale listeners', async () => {
   const ui = runtime(); let resolve;
   const cleanup = ui.mount(ui.root, props({ runEffect: () => new Promise((complete) => { resolve = complete; }) }));
   cleanup(); resolve({ ok: true, value: { video: { duration: 3 }, frames: [] } }); await flush();
   assert.equal(ui.root.children.length, 0); assert.ok([...ui.events.values()].every((listeners) => listeners.size === 0));
 });
-test('locale/theme refresh preserves edits and translates status', async () => {
-  const ui = runtime(); const options = props(); const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'detect');
-  edit(ui.root, 'description', '人工描述'); options.locale = 'en-US'; options.theme = 'light';
-  for (const callback of ui.events.get('ai-canvas-locale-change')) callback();
-  assert.match(texts(ui.root), /Shots detected/); assert.match(texts(ui.root), /Reference video → replica assets/);
-  assert.equal(find(ui.root, (item) => item.dataset.field === 'description').value, '人工描述');
-  assert.equal(find(ui.root, (item) => item.className.startsWith('vr vr-stack')).dataset.theme, 'light'); cleanup();
-});
 test('playback reads only bounded host ranges and revokes its object URL', async () => {
   const ui = runtime(); const cleanup = ui.mount(ui.root, props()); await flush(); await click(ui.root, 'play');
   assert.ok(find(ui.root, (item) => item.tagName === 'video')); cleanup(); assert.deepEqual(ui.revoked, ['blob:test-preview']);
 });
+test('play and pause share one control, preserve the player and never reread the preview', async () => {
+  const ui = runtime(); const options = props(); const regularEffect = options.runEffect; let reads = 0;
+  options.runEffect = (request) => { if (request.type === 'resource.readRange') reads++; return regularEffect(request); };
+  const cleanup = ui.mount(ui.root, options); await flush(); await click(ui.root, 'play');
+  const player = find(ui.root, (item) => item.tagName === 'video'); player.paused = true;
+  player.play = async () => { player.paused = false; player.dispatch('play'); };
+  player.pause = () => { player.paused = true; player.dispatch('pause'); };
+  player.dispatch('loadeddata'); await flush();
+  const control = find(ui.root, (item) => item.dataset.action === 'play');
+  assert.equal(control.attributes['aria-label'], '暂停'); assert.equal(control.attributes['aria-pressed'], 'true');
+  await click(ui.root, 'play'); assert.equal(player.paused, true); assert.equal(control.attributes['aria-label'], '播放');
+  await click(ui.root, 'play'); assert.equal(player.paused, false);
+  assert.equal(find(ui.root, (item) => item.tagName === 'video'), player); assert.equal(reads, 1);
+  player.ended = true; player.currentTime = 12; player.dispatch('ended');
+  await click(ui.root, 'play'); assert.equal(player.currentTime, 0); assert.equal(reads, 1); cleanup();
+});
+
 test('playback above the host string limit reads safe consecutive ranges and preserves every byte', async () => {
   const ui = runtime(); const options = props(); const regularEffect = options.runEffect; const requests = [];
   const bytes = Buffer.alloc(400123); for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
@@ -587,13 +502,6 @@ test('late playback ranges cannot create blobs or update a closed view', async (
   assert.match(texts(ui.root), /正在加载播放预览/); cleanup();
   resolveRead({ ok: true, value: { offset: 0, bytes: 1, base64: 'AA==' } }); await flush();
   assert.equal(ui.blobs.length, 0); assert.equal(ui.root.children.length, 0);
-});
-test('the view owns its scroll viewport and preserves scroll when actions or theme changes rebuild content', async () => {
-  const ui = runtime(); const cleanup = ui.mount(ui.root, props()); await flush();
-  assert.match(ui.root.className, /vr-viewport/); ui.root.scrollTop = 560;
-  await click(ui.root, 'detect'); assert.equal(ui.root.scrollTop, 560);
-  for (const callback of ui.events.get('ai-canvas-theme-change')) callback();
-  assert.equal(ui.root.scrollTop, 560); cleanup(); assert.doesNotMatch(ui.root.className, /vr-viewport/);
 });
 test('browser codec failure revokes playback and keeps thumbnail preview', async () => {
   const ui = runtime(); const cleanup = ui.mount(ui.root, props()); await flush(); await click(ui.root, 'play');
@@ -755,18 +663,32 @@ test('reference-incompatible models are skipped for default depth and unknown wo
   edit(ui.root, 'segment-seconds', 15); select(ui.root, 'audio-mode', 'mute'); await click(ui.root, 'quick-start');
   assert.equal(requests[0].modelId, 'comfyui/video-workflow'); assert.equal(requests[0].audioMode, 'mute'); assert.equal(requests[0].maxSegmentSeconds, 15); cleanup();
 });
-test('quick mode offers submission-guarded channels while advanced mode keeps other configured models', async () => {
-  const ui = runtime(); const base = quickProps();
-  const cleanup = ui.mount(ui.root, quickProps(undefined, { models: [
-    { ...base.models[1], id: 'apimart/other-video', name: 'Other video', provider: 'apimart' }, ...base.models,
+test('host replica support hints control availability independently of model id and provider labels', async () => {
+  const ui = runtime(); const base = quickProps(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => {
+    requests.push(request); return { ok: true, value: jobSnapshot() };
+  }, { models: [base.models[0],
+    { ...base.models[1], videoReplicaSupport: { supported: false, reason: '宿主未接入此复刻通道' } },
+    { ...base.models[1], id: 'host/new-video', provider: 'host-channel', videoReplicaSupport: { supported: true } },
+  ] })); await flush();
+  const picker = ui.modelRenderers.find((renderer) => !renderer.disposals && renderer.options.name === 'quick-model');
+  assert.equal(picker.options.groups[0].items[0].disabled, true);
+  assert.match(picker.options.groups[0].items[0].description, /宿主未接入此复刻通道/);
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'quick-model').value, 'host/new-video');
+  assert.ok(ui.modelRenderers.find((renderer) => !renderer.disposals && renderer.options.name === 'model').options.clearLabel);
+  await click(ui.root, 'quick-start');
+  assert.equal(requests[0].modelId, 'host/new-video'); cleanup();
+});
+
+test('a catalog with only unsupported replica channels stays visible and cannot start a task', async () => {
+  const ui = runtime(); const base = quickProps(); const requests = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => { requests.push(request); }, { models: [base.models[0],
+    { ...base.models[1], videoReplicaSupport: { supported: false } },
   ] })); await flush();
   const quick = find(ui.root, (node) => node.dataset.field === 'quick-model');
-  assert.equal(quick.value, 'general/video-model');
-  assert.equal(quick.children.some((node) => node.value === 'apimart/other-video'), false);
-  await click(ui.root, 'toggle-advanced'); select(ui.root, 'generation-backend', 'model');
-  const advanced = find(ui.root, (node) => node.dataset.field === 'generation-model');
-  assert.equal(advanced.children.some((node) => node.value === 'apimart/other-video'), true);
-  cleanup();
+  assert.equal(quick.value, ''); assert.equal(quick.children.length, 1); assert.equal(quick.children[0].disabled, true);
+  await click(ui.root, 'quick-start'); assert.equal(requests.length, 0);
+  assert.match(texts(ui.root), /选择|请选择/); cleanup();
 });
 test('reopening a host task restores observation and does not resubmit uncertain generation', async () => {
   const ui = runtime(); const requests = [];
@@ -840,14 +762,11 @@ test('older model catalogs fall back to provider groups and reference warnings s
     { ...base.models[1], videoCapability: { maxDuration: 30, maxVideoReferences: 0 } }, base.models[2],
   ] })); await flush();
   const quick = ui.modelRenderers.find((renderer) => !renderer.disposals && renderer.options.name === 'quick-model');
-  assert.deepEqual(clone(quick.options.groups.map((group) => group.label)), ['relay', 'comfyui']);
+  assert.deepEqual(clone(quick.options.groups.map((group) => group.label)), ['relay', '工作流']);
+  assert.equal(quick.options.groups[1].badgeText, 'WF');
+  assert.equal(quick.options.groups[1].items[0].value, 'comfyui/video-workflow');
   const incompatible = quick.options.groups[0].items[0];
   assert.equal(incompatible.label, 'Relay video'); assert.match(incompatible.description, /不支持参考视频/);
   assert.match(incompatible.title, /不支持参考视频/); assert.equal(incompatible.value, 'general/video-model');
-  await click(ui.root, 'toggle-advanced');
-  assert.ok(ui.modelRenderers.some((renderer) => !renderer.disposals && renderer.options.name === 'model'));
-  select(ui.root, 'generation-backend', 'model');
-  const advanced = ui.modelRenderers.find((renderer) => !renderer.disposals && renderer.options.name === 'generation-model');
-  assert.equal(advanced.options.groups[0].items[0].value, 'general/video-model');
   cleanup(); assert.ok(ui.modelRenderers.every((renderer) => renderer.disposals === 1));
 });

@@ -24,7 +24,7 @@ spec.loader.exec_module(plugin)
 
 
 def invocation(controls=None, shots=None):
-    return {"parameters": {"operation": "replicate", "videoResourceId": "video-resource",
+    return {"parameters": {"operation": "replicate-segment", "videoResourceId": "video-resource",
         "shots": shots or [{"key": "shot-1", "inPoint": 0, "outPoint": 1,
                             "description": "人物走过画面", "prompt": "跟随人物，保持运镜。"}],
         "controls": [] if controls is None else controls,
@@ -79,7 +79,7 @@ class ContractTests(unittest.TestCase):
         second = "@{plugin-ref-42345678-1234-4234-8234-123456789abc:镜头二素材}"
         shots = [{"key": "first", "inPoint": 0, "outPoint": 1, "prompt": "跟随走路 " + first},
                  {"key": "second", "inPoint": 1, "outPoint": 2, "prompt": "保持特写 " + second}]
-        for backend in ("materials", "model"):
+        for backend in ("materials",):
             value = invocation(["canny"], shots)
             value["parameters"].update({"character": role + "，红色风衣", "scene": scene})
             value["parameters"]["generation"] = {"backend": backend}
@@ -112,7 +112,7 @@ class ContractTests(unittest.TestCase):
     def test_rejects_bad_ranges_controls_and_node_overflow(self):
         mutations = [
             {"inPoint": -1}, {"inPoint": True}, {"outPoint": float("nan")},
-            {"outPoint": float("inf")}, {"outPoint": 16}, {"outPoint": 0},
+            {"outPoint": float("inf")}, {"outPoint": 31}, {"outPoint": 0},
             {"key": "../bad"},
         ]
         for mutation in mutations:
@@ -174,84 +174,6 @@ class ContractTests(unittest.TestCase):
                         plugin._run_worker({}, 1)
 
 
-class GenerationTests(unittest.TestCase):
-    def value(self, backend="model", provider="volcengine"):
-        value = invocation()
-        value["models"] = [{"id": "selected-video", "provider": provider, "category": "video"}]
-        value["parameters"]["generation"] = {"backend": backend, "modelId": "selected-video",
-                                               "parameters": {"duration": 10, "aspectRatio": "16:9"}}
-        return value
-
-    def test_model_generation_is_delegated_and_uses_exact_shot_duration(self):
-        value = self.value()
-        value["parameters"]["shots"][0].update({"inPoint": 0.125, "outPoint": 1.875,
-                                                "frameResourceId": "frame-resource"})
-        result = plugin.replicate(value)
-        generated = next(n for n in result["data"]["nodes"] if n["nodeType"] == "ai-video")
-        self.assertEqual(generated["generation"], {"modelId": "selected-video",
-                                                  "parameters": {"duration": 1.75, "aspectRatio": "16:9"}})
-        self.assertIn({"sourceKey": "image_shot-1", "targetKey": generated["key"]}, result["data"]["edges"])
-        self.assertNotIn({"sourceKey": "shotlist", "targetKey": generated["key"]}, result["data"]["edges"])
-        self.assertEqual(result["artifacts"], [])
-
-    def test_comfy_provider_is_matched_and_materials_creates_no_generation(self):
-        result = plugin.replicate(self.value("comfyui", "comfyui"))
-        self.assertEqual(sum(n["nodeType"] == "ai-video" for n in result["data"]["nodes"]), 1)
-        material = plugin.replicate(self.value("materials"))
-        self.assertFalse(any(n["nodeType"] == "ai-video" for n in material["data"]["nodes"]))
-
-    def test_model_must_be_in_video_catalog_and_match_selected_backend(self):
-        for backend, provider in (("model", "comfyui"), ("comfyui", "volcengine")):
-            with self.subTest(backend=backend), self.assertRaises(plugin.ReplicaError):
-                plugin.replicate(self.value(backend, provider))
-        for mutation in ({"id": "unknown"}, {"category": "image"}):
-            value = self.value()
-            value["models"][0].update(mutation)
-            with self.assertRaises(plugin.ReplicaError):
-                plugin.replicate(value)
-
-    def test_rejects_paths_workflows_and_unsafe_parameter_values(self):
-        invalid = [{"url": "https://example.com/video"}, {"provider": "comfyui"},
-                   {"workflow": {"node": "custom"}}, {"videoFps": True}, {"generateAudio": 1},
-                   {"videoFrames": 0}, {"duration": float("nan")}, {"duration": 10 ** 500},
-                   {"resolution": "../../file"}, {"aspectRatio": "https://example.com"}]
-        for parameters in invalid:
-            value = self.value()
-            value["parameters"]["generation"]["parameters"] = parameters
-            with self.subTest(parameters=parameters), self.assertRaises(plugin.ReplicaError):
-                plugin.replicate(value)
-        value = self.value()
-        value["parameters"]["generation"]["workflow"] = "external"
-        with self.assertRaises(plugin.ReplicaError):
-            plugin.replicate(value)
-
-    def test_generation_nodes_are_included_in_budget_before_media_work(self):
-        value = self.value()
-        value["parameters"]["controls"] = ["depth", "pose"]
-        value["parameters"]["shots"] = [{"key": "s%d" % i, "inPoint": i, "outPoint": i + 1,
-                                          "frameResourceId": "f%d" % i} for i in range(6)]
-        with patch.object(plugin, "_run_worker") as worker:
-            with self.assertRaisesRegex(plugin.ReplicaError, "25"):
-                plugin.replicate(value)
-        worker.assert_not_called()
-
-    def test_parameter_values_match_host_generation_contract(self):
-        value = self.value()
-        value["parameters"]["generation"]["parameters"] = {"duration": 60, "aspectRatio": "adaptive",
-            "resolution": "4k", "videoResolution": 4096, "videoFps": 120, "videoFrames": 4096,
-            "generateAudio": True}
-        result = plugin.replicate(value)
-        parameters = next(n["generation"]["parameters"] for n in result["data"]["nodes"] if n["nodeType"] == "ai-video")
-        self.assertEqual(parameters["duration"], 1)
-        self.assertEqual(parameters["aspectRatio"], "adaptive")
-        for key, item in (("duration", 61), ("aspectRatio", "auto"), ("resolution", "2160p"),
-                          ("videoResolution", 255), ("videoResolution", 4097), ("videoFrames", 4097)):
-            invalid = self.value()
-            invalid["parameters"]["generation"]["parameters"] = {key: item}
-            with self.subTest(key=key, value=item), self.assertRaises(plugin.ReplicaError):
-                plugin.replicate(invalid)
-
-
 class SegmentTests(unittest.TestCase):
     def value(self, duration=30, target=None):
         value = invocation()
@@ -262,12 +184,14 @@ class SegmentTests(unittest.TestCase):
         value["parameters"]["generation"] = {"backend": "materials"}
         return value
 
-    def test_segment_operation_accepts_thirty_seconds_without_expanding_manual_limits(self):
+    def test_segment_operation_accepts_thirty_seconds_and_rejects_removed_manual_operation(self):
         result = plugin.replicate(self.value())
         self.assertEqual(result["data"]["nodes"][0]["data"]["shotlistRows"][0]["duration"], 30)
         self.assertFalse(any(node["nodeType"] == "ai-video" for node in result["data"]["nodes"]))
-        with self.assertRaisesRegex(plugin.ReplicaError, "15"):
-            plugin.replicate(invocation(shots=[{"key": "manual", "inPoint": 0, "outPoint": 30}]))
+        old = invocation()
+        old["parameters"]["operation"] = "replicate"
+        with self.assertRaisesRegex(plugin.ReplicaError, "仅支持宿主"):
+            plugin.replicate(old)
 
     def test_reference_padding_is_legal_only_for_segments_and_never_shortens_source(self):
         options = plugin._normalise(self.value(2.5, 5)["parameters"])
@@ -277,8 +201,7 @@ class SegmentTests(unittest.TestCase):
                 plugin.replicate(self.value(source, target))
         value = invocation()
         value["parameters"]["shots"][0]["referenceDuration"] = 5
-        with self.assertRaisesRegex(plugin.ReplicaError, "延长"):
-            plugin.replicate(value)
+        self.assertEqual(plugin._normalise(value["parameters"])["shots"][0]["referenceDuration"], 5)
 
     def test_segment_operation_rejects_direct_video_generation(self):
         value = self.value()

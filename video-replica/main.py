@@ -19,7 +19,6 @@ import uuid
 
 MAX_SHOTS = 6
 MAX_NODES = 25
-MAX_SHOT_SECONDS = 15.0
 MAX_SEGMENT_SECONDS = 30.0
 WORK_SECONDS = 110.0
 CONTROL_LABELS = {"depth": "深度", "pose": "骨架", "canny": "线稿"}
@@ -27,8 +26,6 @@ SAFE_KEY = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
 OPAQUE_MENTION = re.compile(
     r"@\{plugin-ref-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[^:{}\r\n]+\}")
-GENERATION_FIELDS = {"duration", "aspectRatio", "resolution", "videoResolution",
-                     "videoFps", "videoFrames", "generateAudio"}
 
 
 class ReplicaError(RuntimeError):
@@ -55,59 +52,10 @@ def _number(value):
     return result
 
 
-def _generation(input_value):
-    raw = input_value.get("parameters", {}).get("generation")
-    if raw is None:
-        return None
-    if not isinstance(raw, dict) or set(raw) - {"backend", "modelId", "parameters"}:
-        raise ReplicaError("视频生成设置包含未支持字段，请重新选择生成方式。")
-    backend = raw.get("backend", "materials")
-    if backend not in ("materials", "model", "comfyui"):
-        raise ReplicaError("视频生成方式无效。")
-    parameters = raw.get("parameters", {})
-    if not isinstance(parameters, dict) or set(parameters) - GENERATION_FIELDS:
-        raise ReplicaError("生成参数仅允许时长、比例、分辨率、帧率、帧数和音频开关。")
-    for key, value in parameters.items():
-        if key == "generateAudio":
-            valid = isinstance(value, bool)
-        elif key == "aspectRatio":
-            valid = isinstance(value, str) and value in ("1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "adaptive")
-        elif key == "resolution":
-            valid = isinstance(value, str) and value in ("480p", "720p", "1080p", "4k")
-        else:
-            try:
-                valid = not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
-            except OverflowError:
-                valid = False
-            if valid:
-                limits = {"duration": (0, 60), "videoResolution": (256, 4096),
-                          "videoFps": (1, 120), "videoFrames": (1, 4096)}
-                minimum, maximum = limits[key]
-                valid = minimum <= value <= maximum and (key != "duration" or value > 0)
-                if key != "duration":
-                    valid = valid and int(value) == value
-        if not valid:
-            raise ReplicaError("视频生成参数格式或范围无效：" + key)
-    if backend == "materials":
-        return None
-    model_id, models = raw.get("modelId"), input_value.get("models", [])
-    if not isinstance(model_id, str) or not model_id or not isinstance(models, list):
-        raise ReplicaError("请选择宿主提供的视频模型。")
-    matches = [m for m in models if isinstance(m, dict) and m.get("id") == model_id
-               and m.get("category") == "video" and isinstance(m.get("provider"), str)]
-    if len(matches) != 1:
-        raise ReplicaError("所选视频模型不可用，请刷新模型目录。")
-    is_comfy = matches[0]["provider"] == "comfyui"
-    if (backend == "comfyui") != is_comfy:
-        raise ReplicaError("生成方式与模型厂商不匹配，请重新选择模型。")
-    return {"modelId": model_id, "parameters": dict(parameters)}
-
-
 def _normalise(parameters):
-    if not isinstance(parameters, dict) or parameters.get("operation") not in ("replicate", "replicate-segment"):
-        raise ReplicaError("请从视频复刻面板提交已确认的镜头。")
-    segmented = parameters["operation"] == "replicate-segment"
-    duration_limit = MAX_SEGMENT_SECONDS if segmented else MAX_SHOT_SECONDS
+    if not isinstance(parameters, dict) or parameters.get("operation") != "replicate-segment":
+        raise ReplicaError("仅支持宿主一键复刻任务的分段素材准备。")
+    duration_limit = MAX_SEGMENT_SECONDS
     raw_shots = parameters.get("shots")
     if not isinstance(raw_shots, list) or not 1 <= len(raw_shots) <= MAX_SHOTS:
         raise ReplicaError("每次处理 1–6 个镜头，请分批提交。")
@@ -127,13 +75,11 @@ def _normalise(parameters):
         start, end = _number(raw.get("inPoint")), _number(raw.get("outPoint"))
         if end <= start or end - start > duration_limit + 1e-6:
             raise ReplicaError("每个%s须大于 0 秒且不超过 %d 秒，请调整切点。" % (
-                "生成段" if segmented else "镜头", duration_limit))
+                "生成段", duration_limit))
         reference_duration = raw.get("referenceDuration", end - start)
         reference_duration = _number(reference_duration)
         if reference_duration < end - start - 1e-6 or reference_duration > duration_limit + 1e-6:
             raise ReplicaError("参考控制视频时长不能短于原片区间或超过本次处理上限。")
-        if not segmented and abs(reference_duration - (end - start)) > 1e-6:
-            raise ReplicaError("手动镜头模式不支持延长控制视频。")
         if start < previous_end - 1e-6:
             raise ReplicaError("镜头须按时间顺序排列，且不能重叠。")
         previous_end = end
@@ -401,13 +347,10 @@ def replicate(input_value):
     if not isinstance(input_value, dict):
         raise ReplicaError("插件输入无效。")
     options = _normalise(input_value.get("parameters"))
-    generation = _generation(input_value)
-    if input_value["parameters"]["operation"] == "replicate-segment" and generation is not None:
+    generation = input_value["parameters"].get("generation")
+    if generation not in (None, {"backend": "materials"}):
         raise ReplicaError("自动生成段只返回控制素材，视频模型由宿主任务调用。")
     shots, controls = options["shots"], options["controls"]
-    node_count = 2 + sum(bool(s["frameResourceId"]) for s in shots) + len(shots) * len(controls)
-    if generation is not None and node_count + len(shots) > MAX_NODES:
-        raise ReplicaError("包含生成节点后超过 25 个节点，请减少镜头或控制类型。")
     artifacts = []
     if controls:
         if importlib.util.find_spec("cv2") is None or importlib.util.find_spec("numpy") is None:
@@ -453,17 +396,6 @@ def replicate(input_value):
                           "data": {"label": "镜头 " + number + " · " + CONTROL_LABELS[artifact["control"]],
                                    "prompt": prompt}})
             edges.append({"sourceKey": "shotlist", "targetKey": artifact["key"]})
-        if generation is not None:
-            generated_key = "generated_" + shot["key"]
-            nodes.append({"key": generated_key, "nodeType": "ai-video",
-                          "data": {"label": "镜头 " + number + " · 复刻视频", "prompt": prompt},
-                          "generation": {"modelId": generation["modelId"],
-                                         "parameters": {**generation["parameters"],
-                                                        "duration": shot["outPoint"] - shot["inPoint"]}}})
-            if shot["frameResourceId"]:
-                edges.append({"sourceKey": "image_" + shot["key"], "targetKey": generated_key})
-            for artifact in (a for a in artifacts if a["shotKey"] == shot["key"]):
-                edges.append({"sourceKey": artifact["key"], "targetKey": generated_key})
     nodes.insert(0, {"key": "shotlist", "nodeType": "ai-shotlist",
                      "data": {"label": "视频复刻 · 分镜表", "shotlistRows": rows}})
     nodes.insert(1, {"key": "prompts", "nodeType": "ai-markdown",
@@ -471,8 +403,7 @@ def replicate(input_value):
     edges.append({"sourceKey": "shotlist", "targetKey": "prompts"})
     return {"data": {"nodes": nodes, "edges": edges},
             "artifacts": [{k: a[k] for k in ("key", "fileName", "mediaType")} for a in artifacts],
-            "message": "已创建 %d 个镜头方案和 %d 个控制视频%s。" % (
-                len(shots), len(artifacts), "，并交给宿主执行视频生成" if generation is not None else "")}
+            "message": "已创建 %d 个分段方案和 %d 个控制视频。" % (len(shots), len(artifacts))}
 
 
 if "define_plugin" in globals():
