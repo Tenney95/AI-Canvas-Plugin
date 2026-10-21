@@ -130,7 +130,9 @@ function createTimelineRenderer(container) {
     startingJob: '正在检查素材、模型与完整分段…', speechRequired: '本地语音模型尚未就绪。首次使用需下载语音模型，再继续复刻。',
     downloadSpeech: '下载语音模型并继续', jobProgress: '复刻进度', cancelJob: '停止任务', jobContinues: '关闭面板后任务由宿主继续；可在画布查看生成片段和成片。',
     invalidCuts: '切点须为原片内部的有效秒数，不能重复。完整视频最多 300 秒、64 个生成段。', jobInvalid: '宿主返回了无效任务状态，请检查应用版本。',
-    refreshJob: '查询任务状态',
+    refreshJob: '查询任务状态', newJob: '新建复刻', restartJob: '重新开始',
+    restartingJob: '正在重新打开复刻界面；请重新确认素材后开始。',
+    restartUnavailable: '当前宿主不支持在窗口内重新开始，请关闭后重新打开插件。',
     unknownJob: '提交状态不确定，请核对已有片段与厂商任务，避免重复付费。',
     succeededJob: '完整复刻已完成，成片已写回画布。', failedJob: '任务未完成，已生成片段保留在画布。',
     cancelledJob: '任务已停止，已生成片段保留在画布。', pausedJob: '任务已暂停，请在宿主检查已有片段。',
@@ -154,7 +156,9 @@ function createTimelineRenderer(container) {
     startingJob: 'Checking materials, model and complete segmentation…', speechRequired: 'Local speech models are not ready. Download them once to continue replication.',
     downloadSpeech: 'Download speech models and continue', jobProgress: 'Replication progress', cancelJob: 'Stop task', jobContinues: 'The host continues the task after closing this panel. Generated segments and final output appear on the canvas.',
     invalidCuts: 'Cuts must be unique times inside the source. The complete video limit is 300 seconds and 64 segments.', jobInvalid: 'The host returned an invalid task state. Check the app version.',
-    refreshJob: 'Refresh task status',
+    refreshJob: 'Refresh task status', newJob: 'New replication', restartJob: 'Start over',
+    restartingJob: 'Reopening replication settings. Review the materials before starting.',
+    restartUnavailable: 'This host cannot restart within this window. Close and reopen the plugin.',
     unknownJob: 'Submission status is unknown. Check existing segments and provider tasks before making another paid request.',
     succeededJob: 'Complete replica saved to the canvas.', failedJob: 'Task incomplete. Generated segments remain on the canvas.',
     cancelledJob: 'Task stopped. Generated segments remain on the canvas.', pausedJob: 'Task paused. Check existing segments in the host.',
@@ -292,7 +296,7 @@ function createTimelineRenderer(container) {
       aspectRatio: '', resolution: '',
       quickModel: '', cuts: [], cutTime: 0, maxSegmentSeconds: 15,
       audioMode: 'original', transcribe: true, job: null, jobRequest: false, speechRequired: false, playbackTime: 0, helpOpen: false };
-    const video = (props.resources?.self || []).find((resource) => resource.origin === 'node-self'
+    let video = (props.resources?.self || []).find((resource) => resource.origin === 'node-self'
       && resource.source?.nodeId === props.node.id && typeof resource.mediaType === 'string' && resource.mediaType.startsWith('video/'));
     const models = (props.models || []).filter((model) => model.category === 'text' && (!model.inputModalities || model.inputModalities.includes('image')));
     const videoModels = (props.models || []).filter((model) => model.category === 'video');
@@ -310,11 +314,86 @@ function createTimelineRenderer(container) {
     let cutIds = new Map(); let nextCutId = 0;
     let activeMention = null; let mentionCounter = 0; let mentionSource = 'nodes'; let mentionInFlight = false; let queuedMention = null;
     const referenceMetadata = new Map(); let referenceEditors = [];
+    let restoredUi = false;
     const t = (key) => (STRINGS[props.locale] || STRINGS['en-US'])[key] || key;
     const jobTerminal = () => Boolean(state.job && ['succeeded', 'failed', 'cancelled', 'paused', 'unknown'].includes(state.job.status));
     const jobActive = () => Boolean(state.job && !jobTerminal());
     const locked = () => state.busy || state.jobRequest || Boolean(state.job);
     const alive = (sequence) => { if (state.disposed || sequence !== state.sequence) throw new Error('stale'); };
+    const lastJobView = () => Boolean(state.job && props.parameters?.replicaLastJob?.jobId === state.job.jobId && !props.parameters?.replicaJob);
+    const jobRestartable = () => Boolean(state.job && ['succeeded', 'failed', 'cancelled'].includes(state.job.status));
+    function captureUi() {
+      const draft = { version: 1, sourceName: String(video?.displayName || '').slice(0, 160),
+        duration: state.duration, width: state.width, height: state.height,
+        character: state.character, scene: state.scene, style: state.style, model: state.model, quickModel: state.quickModel,
+        controls: [...state.controls], cuts: [...state.cuts], cutTime: state.cutTime, maxSegmentSeconds: state.maxSegmentSeconds,
+        aspectRatio: state.aspectRatio, resolution: state.resolution, audioMode: state.audioMode, transcribe: state.transcribe,
+        mentions: [], frames: [] };
+      const text = `${state.character}\n${state.scene}`;
+      for (const item of referenceMetadata.values()) {
+        if (!text.includes(item.token) || draft.mentions.length >= 50) continue;
+        const safe = mentionItems({ items: [item], hasMore: false }, 0)[0];
+        const { thumbnailDataUrl, ...mention } = safe;
+        if (thumbnailDataUrl) mention.thumbnailBase64 = thumbnailDataUrl.slice('data:image/jpeg;base64,'.length);
+        draft.mentions.push(mention);
+      }
+      // 只保存有界像素与显示字段；不保存 Blob URL、资源句柄或文件路径。
+      for (const frame of state.thumbnails.slice(0, 12)) {
+        const match = typeof frame.previewDataUrl === 'string' && frame.previewDataUrl.length <= 240000
+          && /^data:image\/(jpeg|png|webp);base64,([a-zA-Z0-9+/=]+)$/.exec(frame.previewDataUrl);
+        if (!match || !Number.isFinite(frame.actualTime)) continue;
+        const saved = { format: match[1], base64: match[2], actualTime: frame.actualTime };
+        if (JSON.stringify(draft).length + JSON.stringify(saved).length > 640000) break;
+        draft.frames.push(saved);
+      }
+      return draft;
+    }
+    function restoreUi(draft) {
+      if (!draft || draft.version !== 1 || !Number.isFinite(draft.duration) || draft.duration <= 0 || draft.duration > 300) return;
+      for (const key of ['character', 'scene', 'style']) if (typeof draft[key] === 'string') state[key] = draft[key].slice(0, 2000);
+      for (const key of ['model', 'quickModel', 'aspectRatio', 'resolution']) if (typeof draft[key] === 'string') state[key] = draft[key].slice(0, 256);
+      state.duration = draft.duration;
+      for (const key of ['width', 'height']) if (Number.isSafeInteger(draft[key]) && draft[key] > 0 && draft[key] <= 32768) state[key] = draft[key];
+      if (Number.isFinite(draft.cutTime)) state.cutTime = Math.max(0, Math.min(state.duration, draft.cutTime));
+      if (Number.isFinite(draft.maxSegmentSeconds) && draft.maxSegmentSeconds > 0 && draft.maxSegmentSeconds <= 300) state.maxSegmentSeconds = draft.maxSegmentSeconds;
+      if (Array.isArray(draft.cuts)) state.cuts = draft.cuts.filter((value) => Number.isFinite(value) && value > 0 && value < state.duration).slice(0, 63);
+      if (Array.isArray(draft.controls)) state.controls = new Set(draft.controls.filter((value) => ['depth', 'pose', 'canny'].includes(value)));
+      if (['original', 'model', 'mute'].includes(draft.audioMode)) state.audioMode = draft.audioMode;
+      if (typeof draft.transcribe === 'boolean') state.transcribe = draft.transcribe;
+      for (const item of (Array.isArray(draft.mentions) ? draft.mentions : []).slice(0, 50)) {
+        try {
+          const safe = mentionItems({ items: [{ ...item, ...(item.thumbnailBase64 ? { thumbnailDataUrl: `data:image/jpeg;base64,${item.thumbnailBase64}` } : {}) }], hasMore: false }, 0)[0];
+          referenceMetadata.set(safe.token, safe);
+        } catch { /* 无效显示项不能恢复成引用授权。 */ }
+      }
+      state.thumbnails = (Array.isArray(draft.frames) ? draft.frames : []).slice(0, 12).flatMap((frame) =>
+        frame && ['jpeg', 'png', 'webp'].includes(frame.format) && typeof frame.base64 === 'string' && frame.base64.length <= 240000
+          && /^[a-zA-Z0-9+/=]+$/.test(frame.base64) && Number.isFinite(frame.actualTime)
+          ? [{ actualTime: frame.actualTime, previewDataUrl: `data:image/${frame.format};base64,${frame.base64}` }] : []);
+      if (!video && typeof draft.sourceName === 'string') video = { displayName: draft.sourceName.slice(0, 160) };
+      restoredUi = true;
+    }
+    function newJob() {
+      if (!lastJobView() || !jobRestartable() || !video?.resourceId) return;
+      state.job = null; state.character = ''; state.scene = ''; state.style = ''; state.status = ''; state.error = false;
+      referenceMetadata.clear(); render();
+      void perform(initialize);
+    }
+    async function restartJob() {
+      if (state.disposed || state.jobRequest || props.busy || !jobRestartable() || lastJobView()
+        || !props.host?.capabilities?.includes('video.replicaJobRestart')) return;
+      const id = state.job.jobId;
+      state.jobRequest = true; state.error = false; state.status = t('restartingJob'); render();
+      try {
+        const result = await props.runEffect({ type: 'video.replicaJob.restart', jobId: id });
+        if (state.disposed || state.job?.jobId !== id) return;
+        if (!result?.ok) throw new Error(result?.error || t('jobInvalid'));
+        // 宿主会撤销旧观察会话并重新挂载；此处保持只读，不恢复旧 grant 或再次提交生成。
+      } catch (error) {
+        if (state.disposed || state.job?.jobId !== id) return;
+        state.jobRequest = false; state.error = true; state.status = `${t('error')}: ${String(error.message || error).slice(0, 400)}`; render();
+      }
+    }
     function element(tag, className, content) {
       const node = doc.createElement(tag); if (className) node.className = className;
       if (content !== undefined) node.textContent = String(content); return node;
@@ -732,7 +811,7 @@ function createTimelineRenderer(container) {
       jobTimer = setTimeout(() => { jobTimer = null; void pollJob(); }, pollAttempts++ < 3 ? 2000 : 5000);
     }
     async function pollJob() {
-      if (state.disposed || !state.job || pollInFlight) return;
+      if (state.disposed || !state.job || pollInFlight || lastJobView()) return;
       pollInFlight = true;
       const id = state.job.jobId;
       try {
@@ -758,6 +837,8 @@ function createTimelineRenderer(container) {
       catch { state.status = t('invalidCuts'); state.error = true; render(); return; }
       state.jobRequest = true; state.error = false; state.speechRequired = false; state.status = t('startingJob'); render();
       try {
+        if (typeof props.setParameters === 'function') await props.setParameters({ replicaUi: captureUi() });
+        if (state.disposed) return;
         const result = await props.runEffect({ type: 'video.replicaJob.start', resourceId: video.resourceId, modelId: model.id,
           ...(state.model ? { analysisModelId: state.model } : {}), character: state.character, scene: state.scene, style: state.style,
           controls: [...state.controls], cuts: [...state.cuts], maxSegmentSeconds: segmentLimit(model, state.maxSegmentSeconds),
@@ -786,6 +867,22 @@ function createTimelineRenderer(container) {
     function action(label, identifier, handler, disabled = false, primary = false) {
       const node = element('button', `ui-btn${primary ? ' ui-btn--primary' : ''}`, label); node.type = 'button'; node.dataset.action = identifier;
       node.disabled = disabled; listen(node, 'click', () => { if (!node.disabled) void handler(); }); return node;
+    }
+    function appendJobActions(footer) {
+      if (!state.job) return;
+      if (!lastJobView()) footer.append(action(t('refreshJob'), 'refresh-job', () => {
+        if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; } void pollJob();
+      }, state.jobRequest));
+      if (jobActive()) footer.append(action(t('cancelJob'), 'cancel-job', cancelJob, state.jobRequest));
+      else if (jobRestartable()) {
+        const freshSession = lastJobView();
+        const supported = freshSession || props.host?.capabilities?.includes('video.replicaJobRestart');
+        if (!supported) footer.append(element('span', 'min-w-0 flex-1 ui-text-muted text-xs', t('restartUnavailable')));
+        const button = action(t(state.job.status === 'succeeded' ? 'newJob' : 'restartJob'), freshSession ? 'new-job' : 'restart-job',
+          freshSession ? newJob : restartJob, state.jobRequest || Boolean(props.busy) || !supported || freshSession && !video?.resourceId, true);
+        if (!supported) button.title = t('restartUnavailable');
+        footer.append(button);
+      }
     }
     function updateTimelineTime(value, seekPlayer = false) {
       state.cutTime = Math.max(0, Math.min(state.duration, Number(value) || 0));
@@ -874,12 +971,11 @@ function createTimelineRenderer(container) {
       }
       container.append(heading);
       if (!STRINGS[props.locale]) container.append(element('p', 'ui-alert', t('localeFallback')));
-      if (state.job && (!video || props.parameters?.replicaJob)) {
+      if (state.job && (!video || (props.parameters?.replicaJob && !restoredUi))) {
         container.append(renderJobProgress());
         for (const warning of state.job.warnings) container.append(element('p', 'ui-alert', warning));
-        const footer = element('div', 'vr-footer'); footer.append(action(t('close'), 'close', () => props.close(), false),
-          action(t('refreshJob'), 'refresh-job', () => { if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; } void pollJob(); }, state.jobRequest));
-        if (jobActive()) footer.append(action(t('cancelJob'), 'cancel-job', cancelJob, state.jobRequest));
+        const footer = element('div', 'vr-footer'); footer.append(action(t('close'), 'close', () => props.close(), false));
+        appendJobActions(footer);
         container.append(footer); root.append(container); root.scrollTop = scrollTop; return;
       }
       if (!video) { container.append(element('p', 'ui-alert is-error', t('resourceMissing'))); root.append(container); return; }
@@ -980,9 +1076,8 @@ function createTimelineRenderer(container) {
       }
       const footer = element('div', 'vr-footer');
       footer.append(summary, action(t('close'), 'close', () => props.close(), false));
-      if (state.job) footer.append(action(t('refreshJob'), 'refresh-job', () => { if (jobTimer !== null) { clearTimeout(jobTimer); jobTimer = null; } void pollJob(); }, state.jobRequest));
-      if (jobActive()) footer.append(action(t('cancelJob'), 'cancel-job', cancelJob, state.jobRequest));
-      else footer.append(action(t(state.speechRequired ? 'downloadSpeech' : 'quickStart'), state.speechRequired ? 'download-speech' : 'quick-start',
+      appendJobActions(footer);
+      if (!state.job) footer.append(action(t(state.speechRequired ? 'downloadSpeech' : 'quickStart'), state.speechRequired ? 'download-speech' : 'quick-start',
         () => startJob(state.speechRequired), locked() || Boolean(props.busy) || !state.duration || Boolean(state.job), true));
       container.append(footer);
       root.append(container); root.scrollTop = scrollTop; updateSummary();
@@ -998,14 +1093,16 @@ function createTimelineRenderer(container) {
       render();
     }
     window.addEventListener('ai-canvas-theme-change', refresh); window.addEventListener('ai-canvas-locale-change', refresh);
-    if (props.parameters?.replicaJob) {
-      try { applyJob(props.parameters.replicaJob);
+    if (props.parameters?.replicaJob || props.parameters?.replicaLastJob) {
+      restoreUi(props.parameters.replicaUi);
+      try { applyJob(props.parameters.replicaJob || props.parameters.replicaLastJob);
         if (videoModels.some((model) => model.id === state.job.modelId)) state.quickModel = state.job.modelId;
       }
       catch { state.status = t('jobInvalid'); state.error = true; }
     }
-    render(); if (video && !state.job && !props.parameters?.replicaJob) void perform(initialize);
-    if (state.job) void pollJob();
+    if (props.parameters?.replicaRestart === true && lastJobView() && jobRestartable() && video?.resourceId) newJob();
+    else { render(); if (video && !state.job && !props.parameters?.replicaJob) void perform(initialize); }
+    if (state.job && !lastJobView()) void pollJob();
     return function cleanup() {
       state.disposed = true; state.sequence++;
       stopTimelineClock();

@@ -643,7 +643,7 @@ test('job status polling backs off, stops on uncertain submission and never subm
   })); await flush(); await click(ui.root, 'quick-start');
   for (let index = 0; index < 3; index++) { assert.equal([...ui.timers.values()][0].delay, 2000); ui.fireTimer(); await flush(); }
   assert.equal([...ui.timers.values()][0].delay, 5000); ui.fireTimer(); await flush(); assert.equal(ui.timers.size, 0);
-  assert.match(texts(ui.root), /避免重复付费/); assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start').disabled, true);
+  assert.match(texts(ui.root), /避免重复付费/); assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start'), undefined);
   assert.equal(requests.filter((request) => request.type.endsWith('.start')).length, 1); cleanup();
 });
 test('cancel is a host job action and late polling cannot reopen a closed panel', async () => {
@@ -698,6 +698,139 @@ test('reopening a host task restores observation and does not resubmit uncertain
   assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start'), undefined);
   await click(ui.root, 'refresh-job'); assert.deepEqual(requests, ['video.replicaJob.status', 'video.replicaJob.status']); cleanup();
 });
+
+test('starting saves bounded display data before transferring to the background task', async () => {
+  const ui = runtime(); const saved = []; const order = [];
+  const cleanup = ui.mount(ui.root, quickProps(async (request) => {
+    order.push(request.type); return { ok: true, value: jobSnapshot() };
+  }, { async setParameters(patch) { saved.push(clone(patch)); order.push('snapshot'); } }));
+  await flush(); edit(ui.root, 'character', '替换主角'); edit(ui.root, 'scene', '微调背景');
+  await click(ui.root, 'quick-start');
+  assert.deepEqual(order, ['snapshot', 'video.replicaJob.start']);
+  assert.equal(saved[0].replicaUi.character, '替换主角'); assert.equal(saved[0].replicaUi.scene, '微调背景');
+  assert.equal(saved[0].replicaUi.duration, 60);
+  assert.equal(saved[0].replicaUi.sourceName, 'reference.mp4');
+  assert.doesNotMatch(JSON.stringify(saved), /resourceId|filePath|blob:/);
+  cleanup(); assert.equal(ui.timers.size, 0);
+});
+
+function savedReplicaUi() {
+  return { version: 1, sourceName: 'reference.mp4', duration: 29.188, width: 2522, height: 1080,
+    character: `主角换成 ${reference().token}`, scene: '微调背景', style: '电影感',
+    model: 'vision', quickModel: 'general/video-model', controls: ['depth'], cuts: [10], cutTime: 8,
+    maxSegmentSeconds: 15, resolution: '', aspectRatio: '', audioMode: 'original', transcribe: true,
+    frames: [{ format: 'jpeg', base64: 'AA==', actualTime: 0 }], mentions: [{ ...reference(), thumbnailBase64: 'AA==' }] };
+}
+
+test('reopening restores the form, chips, timeline and preview pixels without restoring media grants or restarting the task', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, props({ resources: { self: [] }, parameters: { replicaJob: jobSnapshot(), replicaUi: savedReplicaUi() },
+    async runEffect(request) { requests.push(request.type); return { ok: true, value: jobSnapshot({ completedSegments: 1, progress: .5, updatedAt: 3 }) }; }
+  })); await flush();
+  assert.deepEqual(requests, ['video.replicaJob.status']);
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'scene').value, '微调背景');
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'character').disabled, true);
+  assert.equal(find(ui.root, (node) => node.dataset.referenceToken === reference().token).children[0].src, sample);
+  assert.equal(find(ui.root, (node) => Object.hasOwn(node.dataset, 'timelinePreview')).src, sample);
+  assert.match(texts(ui.root), /29\.188s.*2522×1080/); assert.match(texts(ui.root), /1\/2/);
+  assert.equal(ui.timelineRenderers.at(-1).options.duration, 29.188);
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'play').disabled, true);
+  cleanup(); assert.equal(ui.timers.size, 0);
+});
+
+test('a task finished while closed is displayed without polling and a new task discards revoked reference tokens', async () => {
+  const ui = runtime(); const requests = [];
+  const cleanup = ui.mount(ui.root, props({ parameters: { replicaLastJob: jobSnapshot({ status: 'failed', error: '视觉分析失败' }), replicaUi: savedReplicaUi() },
+    async runEffect(request) { requests.push(request.type); return { ok: true, value: { video: { duration: 29.188, width: 2522, height: 1080 }, frames: [] } }; }
+  })); await flush();
+  assert.match(texts(ui.root), /视觉分析失败/); assert.deepEqual(requests, []);
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'new-job').textContent, '重新开始');
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start'), undefined);
+  await click(ui.root, 'new-job');
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'character').value, '');
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'character').disabled, false);
+  assert.deepEqual(requests, ['video.extractFrames']);
+  assert.equal(ui.timers.size, 0); cleanup();
+});
+
+for (const status of ['failed', 'cancelled', 'succeeded']) {
+  for (const restore of [false, true]) {
+    test(`a bound ${status} task requests a fresh host session without reusing grants (${restore ? 'restored form' : 'summary'})`, async () => {
+      const ui = runtime(); const requests = []; const snapshot = jobSnapshot({ status });
+      const cleanup = ui.mount(ui.root, props({ host: { capabilities: ['video.replicaJobRestart'] }, resources: { self: [] },
+        parameters: { replicaJob: snapshot, ...(restore ? { replicaUi: savedReplicaUi() } : {}) },
+        async runEffect(request) { requests.push(clone(request)); return { ok: true, value: snapshot }; }
+      })); await flush();
+      const restart = find(ui.root, (node) => node.dataset.action === 'restart-job');
+      assert.equal(restart.textContent, status === 'succeeded' ? '新建复刻' : '重新开始');
+      assert.equal(restart.disabled, false);
+      assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start'), undefined);
+      await click(ui.root, 'restart-job');
+      assert.deepEqual(requests, [{ type: 'video.replicaJob.status', jobId: 'job-one' },
+        { type: 'video.replicaJob.restart', jobId: 'job-one' }]);
+      assert.equal(find(ui.root, (node) => node.dataset.action === 'restart-job').disabled, true);
+      if (restore) assert.equal(find(ui.root, (node) => node.dataset.field === 'character').disabled, true);
+      assert.equal(ui.timers.size, 0); cleanup();
+    });
+  }
+}
+
+test('a host without restart capability explains closing and reopening without submitting an unsupported effect', async () => {
+  const ui = runtime(); const requests = []; const snapshot = jobSnapshot({ status: 'failed' });
+  const cleanup = ui.mount(ui.root, props({ parameters: { replicaJob: snapshot, replicaUi: savedReplicaUi() },
+    async runEffect(request) { requests.push(request.type); return { ok: true, value: snapshot }; }
+  })); await flush();
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'restart-job').disabled, true);
+  assert.match(texts(ui.root), /关闭后重新打开插件/);
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start'), undefined);
+  assert.deepEqual(requests, ['video.replicaJob.status']); cleanup();
+});
+
+test('a rejected restart preserves the old read-only task and only permits an explicit retry', async () => {
+  const ui = runtime(); const requests = []; const snapshot = jobSnapshot({ status: 'cancelled' });
+  const cleanup = ui.mount(ui.root, props({ host: { capabilities: ['video.replicaJobRestart'] },
+    parameters: { replicaJob: snapshot, replicaUi: savedReplicaUi() },
+    async runEffect(request) { requests.push(request.type); return request.type.endsWith('.restart')
+      ? { ok: false, error: '会话重开失败' } : { ok: true, value: snapshot }; }
+  })); await flush(); await click(ui.root, 'restart-job');
+  assert.match(texts(ui.root), /会话重开失败/);
+  assert.equal(find(ui.root, (node) => node.dataset.action === 'restart-job').disabled, false);
+  assert.equal(find(ui.root, (node) => node.dataset.field === 'character').disabled, true);
+  assert.deepEqual(requests, ['video.replicaJob.status', 'video.replicaJob.restart']);
+  assert.equal(ui.timers.size, 0); cleanup();
+});
+
+for (const status of ['paused', 'unknown']) {
+  test(`${status} tasks remain query-only even with restart capability and a full display snapshot`, async () => {
+    const ui = runtime(); const requests = []; const snapshot = jobSnapshot({ status });
+    const cleanup = ui.mount(ui.root, props({ host: { capabilities: ['video.replicaJobRestart'] },
+      parameters: { replicaJob: snapshot, replicaUi: savedReplicaUi() },
+      async runEffect(request) { requests.push(request.type); return { ok: true, value: snapshot }; }
+    })); await flush();
+    for (const action of ['quick-start', 'new-job', 'restart-job', 'cancel-job']) {
+      assert.equal(find(ui.root, (node) => node.dataset.action === action), undefined);
+    }
+    await click(ui.root, 'refresh-job');
+    assert.deepEqual(requests, ['video.replicaJob.status', 'video.replicaJob.status']);
+    assert.equal(ui.timers.size, 0); cleanup();
+  });
+}
+
+for (const status of ['failed', 'cancelled', 'succeeded']) {
+  test(`a host-reopened ${status} task enters fresh settings once without another paid start`, async () => {
+    const ui = runtime(); const requests = []; const base = props();
+    const cleanup = ui.mount(ui.root, props({ parameters: {
+      replicaLastJob: jobSnapshot({ status }), replicaRestart: true, replicaUi: savedReplicaUi(),
+    }, async runEffect(request) { requests.push(request.type); return base.runEffect(request); } })); await flush();
+    assert.equal(find(ui.root, (node) => node.dataset.field === 'character').value, '');
+    assert.equal(find(ui.root, (node) => node.dataset.field === 'character').disabled, false);
+    assert.equal(find(ui.root, (node) => node.dataset.field === 'scene').value, '');
+    assert.equal(find(ui.root, (node) => node.dataset.action === 'quick-start').disabled, false);
+    assert.equal(find(ui.root, (node) => node.dataset.action === 'new-job'), undefined);
+    assert.deepEqual(requests, ['video.extractFrames']);
+    assert.equal(ui.timers.size, 0); cleanup();
+  });
+}
 test('observation without source grants shows progress and only queries or cancels the bound task', async () => {
   const ui = runtime(); const requests = [];
   const cleanup = ui.mount(ui.root, props({ parameters: { replicaJob: jobSnapshot() }, resources: { self: [] },
