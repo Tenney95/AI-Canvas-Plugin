@@ -1,6 +1,6 @@
 {
   "apiVersion": 2,
-  "minHostVersion": "0.10.7",
+  "minHostVersion": "0.10.13",
   "requiredCapabilities": [
     "python.executionTimeout",
     "python.mediaWorkspace",
@@ -14,7 +14,7 @@
   "runtime": "python",
   "id": "com.aicanvas.video-replica",
   "name": "视频复刻",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "AI Canvas",
   "repository": "https://github.com/Tenney95/AI-Canvas-Plugin",
   "description": "一键复刻完整视频，可按模型能力自动分段或手动打点，提取音频对白、制作 ReShot 控制素材，通过已配置视频模型或 ComfyUI 生成并合成。",
